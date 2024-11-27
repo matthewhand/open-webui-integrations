@@ -11,7 +11,6 @@ version: 0.4.5
 - [x] Fix "cannot use 'in' operator to search for "detail" in "404: Model not f..." (updated default model id)
 - [x] System message pass-through and override valves
 """
-
 import os
 import json
 import time
@@ -63,9 +62,6 @@ class Pipe:
         manifold_prefix: str = Field(
             default="reason/",
             description="Prefix used for model names.",
-        )
-        streaming_enabled: bool = Field(
-            default=True, description="Enable or disable streaming for responses."
         )
 
         # Thought Handling Configuration
@@ -312,7 +308,7 @@ class Pipe:
         2. Extract and process the model ID.
         3. Handle system message override or pass-through.
         4. Prepare the payload for the model.
-        5. Handle streaming or non-streaming responses based on configuration.
+        5. Handle streaming responses.
         6. Manage errors gracefully.
 
         Args:
@@ -401,12 +397,9 @@ class Pipe:
 
             self.log_debug(f"Payload prepared for model '{model_id}': {payload}")
 
-            if self.valves.streaming_enabled:
-                self.log_debug("Streaming is enabled. Handling stream response.")
-                response = await self.stream_response(payload, __event_emitter__)
-            else:
-                self.log_debug("Streaming is disabled. Handling non-stream response.")
-                response = await self.non_stream_response(payload, __event_emitter__)
+            # Handle streaming response (since streaming_enabled is always True)
+            self.log_debug("Handling stream response.")
+            response = await self.stream_response(payload, __event_emitter__)
 
             self.log_debug("Response handling completed.")
             return response
@@ -970,71 +963,6 @@ class Pipe:
         self.log_debug(
             "[FINALIZE_OUTPUT] Switching back to standard_streaming mode after finalizing output."
         )
-
-    async def non_stream_response(self, payload, __event_emitter__):
-        """
-        Handle non-streaming responses from generate_chat_completions.
-
-        Steps:
-        1. Call the generate_chat_completions function without streaming.
-        2. Emit the assistant's message to the user.
-        3. Emit the final status message indicating the duration of the 'Thinking' phase.
-
-        Args:
-            payload (dict): The payload to send to the model.
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-
-        Returns:
-            Union[str, Dict[str, Any]]: The response content or error message.
-        """
-        self.log_debug("[NON_STREAM_RESPONSE] Entered non_stream_response function.")
-        try:
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Calling generate_chat_completions for non-streaming with payload: {payload}"
-                )
-            response_content = await generate_chat_completions(form_data=payload)
-            self.log_debug(
-                f"[NON_STREAM_RESPONSE] generate_chat_completions response: {response_content}"
-            )
-
-            assistant_message = response_content["choices"][0]["message"][
-                "content"
-            ].rstrip("\n")
-            response_event = {
-                "type": "message",
-                "data": {"content": assistant_message},
-            }
-
-            if __event_emitter__:
-                if self.tags_detected:
-                    await self.emit_status(
-                        __event_emitter__, "Info", "Thinking", initial=True
-                    )
-                await __event_emitter__(response_event)
-                self.log_debug(
-                    "[NON_STREAM_RESPONSE] Non-streaming message event emitted successfully."
-                )
-
-            # Emit the final status or modify message content based on valve
-            await self.emit_final_status(__event_emitter__)
-
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Emitted response event: {response_event}"
-                )
-
-            return response_content
-        except Exception as e:
-            if __event_emitter__:
-                await self.emit_status(
-                    __event_emitter__, "Error", f"Error: {str(e)}", True
-                )
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Error in non-stream response handling: {e}"
-                )
-            return f"Error: {e}"
 
     async def process_streaming_data(
         self, data: str, __event_emitter__, is_final_chunk: bool = False
