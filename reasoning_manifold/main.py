@@ -19,7 +19,7 @@ import time
 import asyncio
 from typing import List, Union, Optional, Callable, Awaitable, Dict, Any
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import pop_system_message, remove_system_message
+from open_webui.utils.misc import pop_system_message, add_or_update_system_message
 from starlette.responses import StreamingResponse
 from open_webui.main import (
     generate_chat_completions,
@@ -383,28 +383,25 @@ class Pipe:
 
             self.log_debug(f"Selected task_model_id: {self.task_model_id}")
             # Handle system messages if present (assumes system messages are separated)
-            messages = body.get("messages", [])
-            system_message, messages = pop_system_message(messages)
-            self.log_debug(f"System message: {system_message}")
-            self.log_debug(
-                f"Number of messages after popping system message: {len(messages)}"
-            )
+            body_messages = body.get("messages", [])
+            system_message, messages = pop_system_message(body_messages)
 
             # Handle system message override or pass-through
             if self.valves.system_message_override_enabled:
-                if system_message:
-                    # Pop the system message from the list
-                    messages = remove_system_message(messages)
                 # Append the overridden system message to the beginning of the list
-                messages.insert(
-                    0,
-                    {"role": "system", "content": self.valves.system_message_override},
+                add_or_update_system_message(
+                    self.valves.system_message_override, messages
                 )
                 self.log_debug(
                     f"Overriding system message with system_message_override: {self.valves.system_message_override}"
                 )
-            else:
-                self.log_debug(f"Using existing system message: {system_message}")
+            elif system_message:
+                # Append the provided system message to the beginning of the list
+                system_message_content = get_content_from_message(system_message)
+                add_or_update_system_message(system_message_content, messages)
+                self.log_debug(
+                    f"Using provided system message: {system_message_content}"
+                )
 
             # Log the total number of messages after handling system message
             self.log_debug(
