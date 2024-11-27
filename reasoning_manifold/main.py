@@ -1,6 +1,6 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.4
+version: 0.4.5
 
 - [x] Updated to work on OWUI 0.4.x
 - [x] OpenAI Streaming
@@ -9,7 +9,7 @@ version: 0.4.4
 - [x] LLM summary generation
 - [x] Improved parsing and streaming
 - [x] Fix "cannot use 'in' operator to search for "detail" in "404: Model not f..." (updated default model id)
-
+- [x] System message pass-through and override valves
 """
 
 import os
@@ -18,7 +18,7 @@ import time
 import asyncio
 from typing import List, Union, Optional, Callable, Awaitable, Dict, Any
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import pop_system_message
+from open_webui.utils.misc import get_system_message, remove_system_message
 from starlette.responses import StreamingResponse
 from open_webui.main import (
     generate_chat_completions,
@@ -31,7 +31,6 @@ import logging
 import inspect  # For inspecting function signatures
 import re  # For regex operations
 
-
 # Mock the user object as expected by the function (OWUI 0.4.x constraint)
 mock_user = {
     "id": "reasoning_manifold",
@@ -40,6 +39,8 @@ mock_user = {
 }
 
 THOUGHT_SUMMARY_PLACEHOLDER = "your-task-model-id-goes-here"
+
+SYSTEM_MESSAGE_DEFAULT = "Respond using <Thought> and <Output> tags."
 
 
 class Pipe:
@@ -111,28 +112,23 @@ class Pipe:
             description="Interval in seconds between status updates.",
         )
 
+        # System Message Override Configuration
+        system_message_override_enabled: bool = Field(
+            default=True,
+            description=(
+                "Enable system message override with default message. "
+                "If set to False, the original system message is retained."
+            ),
+        )
+        system_message_override: str = Field(
+            default=SYSTEM_MESSAGE_DEFAULT,
+            description=(
+                "The system message to override with if system_message_override_enabled is True."
+            ),
+        )
+
         # Debugging
         debug_valve: bool = Field(default=False, description="Enable debug logging.")
-
-    def reset_state(self):
-        """Reset state variables for reuse in new requests."""
-        # Safely reset essential state variables
-        self.thought_buffer = ""  # Accumulate thoughts for collapsible sections
-        self.output_buffer = ""  # Accumulate emitted output tokens
-        self.word_count_since_last_summary = 0  # Word count tracker for summaries
-        self.start_time = time.time()  # Reset start time for duration tracking
-        self.tracked_tokens = []  # Tracked tokens for dynamic summaries
-        self.stop_emitter.clear()  # Ensure emitter can be stopped cleanly
-        self.final_status_emitted = False  # Reset final status emission flag
-        self.summary_in_progress = False  # Summary generation flag
-        self.mode = "buffer_parsing"  # Default operational mode
-
-        # Log non-reset fields for safety verification
-        self.log_debug(f"[RESET_STATE] Buffer retained: {self.buffer}")
-        self.log_debug(f"[RESET_STATE] Messages retained: {self.messages}")
-        self.log_debug(
-            f"[RESET_STATE] Output buffer tokens retained: {self.output_buffer_tokens}"
-        )
 
     def __init__(self):
         """
@@ -191,12 +187,31 @@ class Pipe:
         self.mode = "buffer_parsing"  # Modes: buffer_parsing, thought_parsing, output_parsing, standard_streaming
 
         # Buffer for Output tag detection
-        self.output_buffer_tokens = (
-            []
-        )  # Buffer to hold last few tokens for Output tag detection
+        self.output_buffer_tokens = []  # Buffer to hold last few tokens for Output tag detection
         self.output_buffer_limit = 5  # Number of tokens to buffer for tag detection
 
+        # Initialize state
         self.reset_state()
+
+    def reset_state(self):
+        """Reset state variables for reuse in new requests."""
+        # Safely reset essential state variables
+        self.thought_buffer = ""  # Accumulate thoughts for collapsible sections
+        self.output_buffer = ""  # Accumulate emitted output tokens
+        self.word_count_since_last_summary = 0  # Word count tracker for summaries
+        self.start_time = time.time()  # Reset start time for duration tracking
+        self.tracked_tokens = []  # Tracked tokens for dynamic summaries
+        self.stop_emitter.clear()  # Ensure emitter can be stopped cleanly
+        self.final_status_emitted = False  # Reset final status emission flag
+        self.summary_in_progress = False  # Summary generation flag
+        self.mode = "buffer_parsing"  # Default operational mode
+
+        # Log non-reset fields for safety verification
+        self.log_debug(f"[RESET_STATE] Buffer retained: {self.buffer}")
+        self.log_debug(f"[RESET_STATE] Messages retained: {self.messages}")
+        self.log_debug(
+            f"[RESET_STATE] Output buffer tokens retained: {self.output_buffer_tokens}"
+        )
 
     def log_debug(self, message: str):
         """Log debug messages if debugging is enabled."""
@@ -265,7 +280,7 @@ class Pipe:
         if (
             self.valves.thought_summary_model_id
             and self.valves.thought_summary_model_id.lower()
-            != THOUGHT_SUMMARY_PLACEHOLDER
+            != THOUGHT_SUMMARY_PLACEHOLDER.lower()
         ):
             self.log_debug(
                 f"[SUMMARY_CHECK] Using model ID for summary: {self.valves.thought_summary_model_id}"
@@ -295,9 +310,10 @@ class Pipe:
         Steps:
         1. Reset state variables for each new request.
         2. Extract and process the model ID.
-        3. Prepare the payload for the model.
-        4. Handle streaming or non-streaming responses based on configuration.
-        5. Manage errors gracefully.
+        3. Handle system message override or pass-through.
+        4. Prepare the payload for the model.
+        5. Handle streaming or non-streaming responses based on configuration.
+        6. Manage errors gracefully.
 
         Args:
             body (dict): The incoming request payload.
@@ -308,39 +324,6 @@ class Pipe:
             Union[str, StreamingResponse]: The response to be sent back.
         """
         # Reset state variables for each new request
-        self.thought_buffer = ""
-        self.output_buffer = ""
-        self.word_count_since_last_summary = 0
-        self.tracked_tokens = []
-        self.last_summary_time = time.time()
-        self.start_time = time.time()
-        self.stop_emitter.clear()
-        self.thought_summary_task = None
-        self.buffer = ""  # Reset buffer
-        self.task_model_id = None  # Reset task model ID
-        self.messages = []  # Reset messages list
-        self.determined = False
-        self.inside_thought = False
-        self.inside_output = False
-        self.tags_detected = False  # Initialize tags_detected
-        self.summary_in_progress = False  # Flag to indicate summary generation
-        self.llm_tasks = []  # List to track LLM tasks
-        self.final_status_emitted = False  # Flag to indicate if final status is emitted
-
-        # Reset current tags
-        self.current_thought_tag = (
-            self.valves.thought_tag
-        )  # Default to valve's thought_tag
-        self.current_output_tag = (
-            self.valves.output_tag
-        )  # Default to valve's output_tag
-
-        # Reset operational mode
-        self.mode = "buffer_parsing"
-
-        # Reset output buffer tokens
-        self.output_buffer_tokens = []
-
         self.reset_state()
 
         try:
@@ -366,12 +349,25 @@ class Pipe:
 
             self.log_debug(f"Selected task_model_id: {self.task_model_id}")
 
-            # Handle system messages if present (assumes system messages are separated)
-            system_message, messages = pop_system_message(body.get("messages", []))
-            self.log_debug(f"System message: {system_message}")
-            self.log_debug(
-                f"Number of messages after popping system message: {len(messages)}"
-            )
+            # Retrieve the system message without removing it from the messages list
+            messages = body.get("messages", [])
+            system_message = get_system_message(messages)
+
+            # Handle system message override or pass-through
+            if self.valves.system_message_override_enabled:
+                if system_message:
+                    # Pop the system message from the list
+                    messages = remove_system_message(messages)
+                # Append the overridden system message to the beginning of the list
+                messages.insert(0, {"role": "system", "content": self.valves.system_message_override})
+                self.log_debug(
+                    f"Overriding system message with system_message_override: {self.valves.system_message_override}"
+                )
+            else:
+                self.log_debug(f"Using existing system message: {system_message}")
+
+            # Log the total number of messages after handling system message
+            self.log_debug(f"Total number of messages after processing system message: {len(messages)}")
 
             self.messages = messages  # Store messages for later modification
 
@@ -392,8 +388,7 @@ class Pipe:
                     "role": message["role"],
                     "content": (
                         self.clean_message_content(message.get("content", ""))
-                        if message["role"] == "assistant"
-                        else message.get("content", "")
+                        if message["role"] == "assistant" else message.get("content", "")
                     ),
                 }
                 for message in messages
@@ -590,11 +585,11 @@ class Pipe:
                                         f"[STREAM_RESPONSE] Appended data to tracked_tokens: {data}"
                                     )
 
-                                    # Increment token count based on word count
+                                    # Increment word count based on word count
                                     word_count = len(data.split())
                                     self.word_count_since_last_summary += word_count
                                     self.log_debug(
-                                        f"[TOKEN_COUNT] Tokens since last summary: {self.word_count_since_last_summary}"
+                                        f"[TOKEN_COUNT] Words since last summary: {self.word_count_since_last_summary}"
                                     )
 
                                     # Detect tags and set tags_detected flag
@@ -602,7 +597,7 @@ class Pipe:
                                         data, __event_emitter__
                                     )
 
-                                    # **Trigger summary if token count exceeds interval**
+                                    # **Trigger summary if word count exceeds interval**
                                     if (
                                         self.word_count_since_last_summary
                                         >= self.valves.thought_summary_interval_words
@@ -610,7 +605,7 @@ class Pipe:
                                         # Check if a summary is already in progress
                                         if not self.summary_in_progress:
                                             self.log_debug(
-                                                f"[TOKEN_SUMMARY] Reached {self.valves.thought_summary_interval_words} tokens. Generating summary."
+                                                f"[TOKEN_SUMMARY] Reached {self.valves.thought_summary_interval_words} words. Generating summary."
                                             )
                                             # Create a task for summary generation and track it
                                             summary_task = asyncio.create_task(
@@ -676,11 +671,11 @@ class Pipe:
             )
             return
 
-        if not (self.valves.enable_llm_summaries):
+        if not self.valves.enable_llm_summaries:
             self.log_debug("[TRIGGER_SUMMARY] LLM summaries are disabled.")
             return
 
-        if not (self.tags_detected):
+        if not self.tags_detected:
             self.log_debug("[TRIGGER_SUMMARY] No tags detected.")
             return
 
@@ -912,10 +907,6 @@ class Pipe:
                 await asyncio.sleep(0.1)
             self.log_debug("[FINAL_STATUS] Ongoing summary generation completed.")
 
-        # # Add an additional brief delay
-        # self.log_debug("[FINAL_STATUS] Adding 3-second delay for late summaries.")
-        # await asyncio.sleep(3)
-
         # Calculate elapsed time
         elapsed_time = time.time() - self.start_time
 
@@ -1061,6 +1052,7 @@ class Pipe:
         Args:
             data (str): The incoming data chunk to process.
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+            is_final_chunk (bool): Indicates if this is the final chunk in the stream.
         """
         self.log_debug(
             f"[PROCESS_DATA] Processing streaming data: {data}, Final Chunk: {is_final_chunk}"
@@ -1140,7 +1132,7 @@ class Pipe:
 
                     await self.emit_final_status(__event_emitter__)
 
-                    # Switch to standard streaming after thought parsing
+                    # Switch to buffer_parsing mode after thought parsing
                     self.mode = "buffer_parsing"
                     self.log_debug(
                         "[THOUGHT_PARSING] Switching to buffer_parsing mode after emitting collapsible thoughts."
@@ -1228,68 +1220,3 @@ class Pipe:
             )
             await self.emit_output(__event_emitter__, self.buffer.strip())
             self.buffer = ""
-
-    async def non_stream_response(self, payload, __event_emitter__):
-        """
-        Handle non-streaming responses from generate_chat_completions.
-
-        Steps:
-        1. Call the generate_chat_completions function without streaming.
-        2. Emit the assistant's message to the user.
-        3. Emit the final status message indicating the duration of the 'Thinking' phase.
-
-        Args:
-            payload (dict): The payload to send to the model.
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-
-        Returns:
-            Union[str, Dict[str, Any]]: The response content or error message.
-        """
-        self.log_debug("[NON_STREAM_RESPONSE] Entered non_stream_response function.")
-        try:
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Calling generate_chat_completions for non-streaming with payload: {payload}"
-                )
-            response_content = await generate_chat_completions(form_data=payload)
-            self.log_debug(
-                f"[NON_STREAM_RESPONSE] generate_chat_completions response: {response_content}"
-            )
-
-            assistant_message = response_content["choices"][0]["message"][
-                "content"
-            ].rstrip("\n")
-            response_event = {
-                "type": "message",
-                "data": {"content": assistant_message},
-            }
-
-            if __event_emitter__:
-                if self.tags_detected:
-                    await self.emit_status(
-                        __event_emitter__, "Info", "Thinking", initial=True
-                    )
-                await __event_emitter__(response_event)
-                self.log_debug(
-                    "[NON_STREAM_RESPONSE] Non-streaming message event emitted successfully."
-                )
-
-            # Emit the final status or modify message content based on valve
-            await self.emit_final_status(__event_emitter__)
-
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Emitted response event: {response_event}"
-                )
-
-            return response_content
-        except Exception as e:
-            if __event_emitter__:
-                await self.emit_status(
-                    __event_emitter__, "Error", f"Error: {str(e)}", True
-                )
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Error in non-stream response handling: {e}"
-                )
-            return f"Error: {e}"
