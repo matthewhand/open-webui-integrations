@@ -1,6 +1,6 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.5
+version: 0.4.6
 
 - [x] Updated to work on OWUI 0.4.x
 - [x] OpenAI Streaming
@@ -10,6 +10,8 @@ version: 0.4.5
 - [x] Improved parsing and streaming
 - [x] Fix "cannot use 'in' operator to search for "detail" in "404: Model not f..." (updated default model id)
 - [x] System message pass-through and override valves
+- [x] Emit status interval
+- [ ] Fix "Cannot use 'in' operator to search for "detail" in 'dict' object has no attribute 'name'" (=base model has system prompt)
 
 """
 
@@ -143,13 +145,7 @@ class Pipe:
         self.final_status_emitted = False  # Reset final status emission flag
         self.summary_in_progress = False  # Summary generation flag
         self.mode = "buffer_parsing"  # Default operational mode
-
-        # Log non-reset fields for safety verification
-        self.log_debug(f"[RESET_STATE] Buffer retained: {self.buffer}")
-        self.log_debug(f"[RESET_STATE] Messages retained: {self.messages}")
-        self.log_debug(
-            f"[RESET_STATE] Output buffer tokens retained: {self.output_buffer_tokens}"
-        )
+        self.last_emit_time = 0  # Reset last emission time
 
     def __init__(self):
         """
@@ -177,6 +173,8 @@ class Pipe:
         self.summary_in_progress = False  # Flag to indicate summary generation
         self.llm_tasks = []  # List to track LLM tasks
         self.final_status_emitted = False  # Flag to indicate if final status is emitted
+        self.last_emit_time = 0  # Initialize last emission time
+        self.reset_state()
 
         self.messages = []  # Store the messages list
         self.thought_tags = []  # List of thought tags per model
@@ -813,18 +811,22 @@ class Pipe:
             done (bool): Indicates if this is the final status update.
             initial (bool): Indicates if this is the initial status update.
         """
-        if __event_emitter__:
-            elapsed_time = time.time() - self.start_time
-            minutes, seconds = divmod(int(elapsed_time), 60)
-            if minutes > 0:
-                time_suffix = f"{minutes}m {seconds}s"
-            else:
-                time_suffix = f"{seconds}s"
+        current_time = time.time()
+        elapsed_time = current_time - self.last_emit_time
 
-            # Determine the appropriate status message
+        if elapsed_time < self.valves.emit_interval and not done:
+            # Skip emitting if the interval hasn't passed and it's not a final update
+            self.log_debug(
+                f"[EMIT_STATUS] Skipping emission. Elapsed time: {elapsed_time:.2f}s, Emit interval: {self.valves.emit_interval}s."
+            )
+            return
+
+        if __event_emitter__:
             if initial:
                 formatted_message = "Thinking"
             elif done:
+                minutes, seconds = divmod(int(elapsed_time), 60)
+                time_suffix = f"{minutes}m {seconds}s" if minutes > 0 else f"{seconds}s"
                 formatted_message = f"Thought for {time_suffix}"
             else:
                 formatted_message = message if message else "Processing..."
@@ -833,16 +835,18 @@ class Pipe:
             event = {
                 "type": "status",
                 "data": {
-                    # "level": level,
                     "description": formatted_message,
                     "done": done,
                 },
             }
-            self.log_debug(f"[EMIT_STATUS] Emitting status: {formatted_message}")
+            self.log_debug(
+                f"[EMIT_STATUS] Attempting to emit status: {formatted_message}"
+            )
 
             try:
                 await __event_emitter__(event)
                 self.log_debug("[EMIT_STATUS] Status emitted successfully.")
+                self.last_emit_time = current_time  # Update the last emission time
             except Exception as e:
                 self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
 
