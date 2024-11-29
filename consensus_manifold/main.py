@@ -177,6 +177,7 @@ class Pipe:
         self.final_status_emitted: bool = (
             False  # Flag to indicate if final status is emitted
         )
+        self.tags_detected: bool = False  # Flag for tag detection
 
         # Logging Setup
         self.log = logging.getLogger(self.__class__.__name__)
@@ -210,6 +211,7 @@ class Pipe:
         self.buffer = ""
         self.summary_in_progress = False
         self.final_status_emitted = False
+        self.tags_detected = False
         self.log_debug("[RESET_STATE] State variables have been reset.")
         self.start_time = time.time()  # Start time of the current pipe execution
 
@@ -491,6 +493,15 @@ class Pipe:
         """
         Query a single contributing model with the provided payload.
         Handles both streaming and non-streaming responses.
+
+        **Updated to handle StreamingResponse correctly while preserving content formatting.**
+
+        Args:
+            model_id (str): The ID of the contributing model.
+            payload (dict): The payload to send to the model.
+
+        Returns:
+            Dict[str, str]: A dictionary containing the model ID and its output or error.
         """
         self.log_debug(
             f"[QUERY_CONTRIBUTOR] Querying contributing model: {model_id} with payload: {payload}"
@@ -506,69 +517,83 @@ class Pipe:
                 )
                 collected_output = ""
                 async for chunk in response.body_iterator:
-                    if isinstance(chunk, bytes):
-                        chunk_str = chunk.decode("utf-8")
-                    elif isinstance(chunk, str):
-                        chunk_str = chunk
-                    else:
+                    try:
+                        # Decode chunk into string if bytes
+                        if isinstance(chunk, bytes):
+                            chunk_str = chunk.decode("utf-8")
+                        elif isinstance(chunk, str):
+                            chunk_str = chunk
+                        else:
+                            self.log_debug(
+                                f"[QUERY_CONTRIBUTOR] Unexpected chunk type: {type(chunk)}"
+                            )
+                            continue
+
                         self.log_debug(
-                            f"[QUERY_CONTRIBUTOR] Unexpected chunk type: {type(chunk)}"
+                            f"[QUERY_CONTRIBUTOR] Received chunk: {chunk_str}"
                         )
-                        continue
 
-                    self.log_debug(f"[QUERY_CONTRIBUTOR] Received chunk: {chunk_str}")
+                        # Strip 'data: ' prefix if present
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[6:].strip()
 
-                    # Accumulate the streamed data
-                    collected_output += chunk_str
+                        if chunk_str == "[DONE]":  # End of stream
+                            self.log_debug(
+                                "[QUERY_CONTRIBUTOR] Received [DONE] signal. Ending stream."
+                            )
+                            break
+
+                        if not chunk_str:
+                            continue  # Skip empty chunks
+
+                        # Attempt to parse JSON content
+                        data = json.loads(chunk_str)
+
+                        # Handle both 'delta' and 'message' keys
+                        if "choices" in data and len(data["choices"]) > 0:
+                            choice = data["choices"][0]
+                            if "delta" in choice and "content" in choice["delta"]:
+                                message_content = choice["delta"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[QUERY_CONTRIBUTOR] Accumulated content: {message_content}"
+                                )
+                            elif "message" in choice and "content" in choice["message"]:
+                                message_content = choice["message"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[QUERY_CONTRIBUTOR] Accumulated content: {message_content}"
+                                )
+                            else:
+                                self.log_debug(
+                                    f"[QUERY_CONTRIBUTOR] No 'content' found in 'delta' or 'message' for chunk: {chunk_str}"
+                                )
+                        else:
+                            self.log_debug(
+                                f"[QUERY_CONTRIBUTOR] Unexpected 'choices' structure in chunk: {chunk_str}"
+                            )
+
+                    except json.JSONDecodeError as e:
+                        self.log_debug(
+                            f"[QUERY_CONTRIBUTOR] JSON decoding error: {e} for chunk: {chunk_str}"
+                        )
+                    except Exception as e:
+                        self.log_debug(
+                            f"[QUERY_CONTRIBUTOR] Error processing chunk: {e}"
+                        )
 
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Collected output from {model_id}: {collected_output}"
                 )
-
-                # Parse the collected output as JSON
-                try:
-                    response_data = json.loads(collected_output)
-                    output = response_data["choices"][0]["message"]["content"].rstrip(
-                        "\n"
-                    )
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] Parsed output from {model_id}: {output}"
-                    )
-                    return {"model": model_id, "output": output}
-                except json.JSONDecodeError as parse_error:
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] JSON decoding error for model {model_id}: {parse_error}"
-                    )
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] Raw collected output: {collected_output}"
-                    )
-                    # Attempt to dump available keys if possible
-                    try:
-                        temp_data = json.loads(collected_output)
-                        if isinstance(temp_data, dict):
-                            keys = temp_data.keys()
-                            self.log_debug(
-                                f"[QUERY_CONTRIBUTOR] Available keys in JSON: {list(keys)}"
-                            )
-                    except:
-                        self.log_debug(
-                            "[QUERY_CONTRIBUTOR] Unable to parse JSON to dump keys."
-                        )
-                    return {
-                        "model": model_id,
-                        "error": f"JSON Decode Error: {parse_error}",
-                    }
-                except KeyError as key_error:
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] Key error while parsing response from {model_id}: {key_error}"
-                    )
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] Raw collected output: {collected_output}"
-                    )
-                    return {"model": model_id, "error": f"Key Error: {key_error}"}
+                return {"model": model_id, "output": collected_output}
             else:
                 # Handle non-streaming response as before
-                output = response["choices"][0]["message"]["content"].rstrip("\n")
+                output = (
+                    response.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .rstrip("\n")
+                )
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {output}"
                 )
@@ -727,26 +752,93 @@ class Pipe:
                 form_data=payload, user=mock_user
             )
 
-            # Log and handle the raw response object
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Raw response object: {consensus_response}"
-            )
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Response type: {type(consensus_response)}"
-            )
+            # Handle StreamingResponse if consensus_response is streaming
+            if isinstance(consensus_response, StreamingResponse):
+                self.log_debug(
+                    f"[GENERATE_CONSENSUS] Consensus model {consensus_model_id} returned StreamingResponse. Processing stream."
+                )
+                collected_output = ""
+                async for chunk in consensus_response.body_iterator:
+                    try:
+                        # Decode chunk into string if bytes
+                        if isinstance(chunk, bytes):
+                            chunk_str = chunk.decode("utf-8")
+                        elif isinstance(chunk, str):
+                            chunk_str = chunk
+                        else:
+                            self.log_debug(
+                                f"[GENERATE_CONSENSUS] Unexpected chunk type: {type(chunk)}"
+                            )
+                            continue
 
-            # Decode the response
-            if hasattr(consensus_response, "json"):
-                response_data = await consensus_response.json()
+                        self.log_debug(
+                            f"[GENERATE_CONSENSUS] Received chunk: {chunk_str}"
+                        )
+
+                        # Strip 'data: ' prefix if present
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[6:].strip()
+
+                        if chunk_str == "[DONE]":  # End of stream
+                            self.log_debug(
+                                "[GENERATE_CONSENSUS] Received [DONE] signal. Ending stream."
+                            )
+                            break
+
+                        if not chunk_str:
+                            continue  # Skip empty chunks
+
+                        # Attempt to parse JSON content
+                        data = json.loads(chunk_str)
+
+                        # Handle both 'delta' and 'message' keys
+                        if "choices" in data and len(data["choices"]) > 0:
+                            choice = data["choices"][0]
+                            if "delta" in choice and "content" in choice["delta"]:
+                                message_content = choice["delta"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[GENERATE_CONSENSUS] Accumulated content: {message_content}"
+                                )
+                            elif "message" in choice and "content" in choice["message"]:
+                                message_content = choice["message"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[GENERATE_CONSENSUS] Accumulated content: {message_content}"
+                                )
+                            else:
+                                self.log_debug(
+                                    f"[GENERATE_CONSENSUS] No 'content' found in 'delta' or 'message' for chunk: {chunk_str}"
+                                )
+                        else:
+                            self.log_debug(
+                                f"[GENERATE_CONSENSUS] Unexpected 'choices' structure in chunk: {chunk_str}"
+                            )
+
+                    except json.JSONDecodeError as e:
+                        self.log_debug(
+                            f"[GENERATE_CONSENSUS] JSON decoding error: {e} for chunk: {chunk_str}"
+                        )
+                    except Exception as e:
+                        self.log_debug(
+                            f"[GENERATE_CONSENSUS] Error processing chunk: {e}"
+                        )
+
+                self.consensus_output = collected_output.strip()
             else:
-                response_data = consensus_response  # Assume it's already a dict
+                # Handle non-streaming response
+                if hasattr(consensus_response, "json"):
+                    response_data = await consensus_response.json()
+                else:
+                    response_data = consensus_response  # Assume it's already a dict
 
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Parsed response data: {response_data}"
-            )
+                self.log_debug(
+                    f"[GENERATE_CONSENSUS] Parsed response data: {response_data}"
+                )
 
-            # Extract the consensus output
-            self.consensus_output = response_data.get("consensus", "").strip()
+                # Extract the consensus output
+                self.consensus_output = response_data.get("consensus", "").strip()
+
             self.log_debug(
                 f"[GENERATE_CONSENSUS] Consensus output: {self.consensus_output}"
             )
@@ -803,13 +895,93 @@ class Pipe:
             # Call the generate_moa_response function
             response = await generate_moa_response(form_data=payload, user=mock_user)
 
-            # Handle the response format
-            if hasattr(response, "json"):
-                response_data = await response.json()
-            else:
-                response_data = response  # Assume it's already a dict
+            # Handle StreamingResponse if response is streaming
+            if isinstance(response, StreamingResponse):
+                self.log_debug(
+                    f"[USE_MOA_RESPONSE] MOA model {consensus_model_id} returned StreamingResponse. Processing stream."
+                )
+                collected_output = ""
+                async for chunk in response.body_iterator:
+                    try:
+                        # Decode chunk into string if bytes
+                        if isinstance(chunk, bytes):
+                            chunk_str = chunk.decode("utf-8")
+                        elif isinstance(chunk, str):
+                            chunk_str = chunk
+                        else:
+                            self.log_debug(
+                                f"[USE_MOA_RESPONSE] Unexpected chunk type: {type(chunk)}"
+                            )
+                            continue
 
-            self.consensus_output = response_data.get("consensus", "").strip()
+                        self.log_debug(
+                            f"[USE_MOA_RESPONSE] Received chunk: {chunk_str}"
+                        )
+
+                        # Strip 'data: ' prefix if present
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[6:].strip()
+
+                        if chunk_str == "[DONE]":  # End of stream
+                            self.log_debug(
+                                "[USE_MOA_RESPONSE] Received [DONE] signal. Ending stream."
+                            )
+                            break
+
+                        if not chunk_str:
+                            continue  # Skip empty chunks
+
+                        # Attempt to parse JSON content
+                        data = json.loads(chunk_str)
+
+                        # Handle both 'delta' and 'message' keys
+                        if "choices" in data and len(data["choices"]) > 0:
+                            choice = data["choices"][0]
+                            if "delta" in choice and "content" in choice["delta"]:
+                                message_content = choice["delta"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[USE_MOA_RESPONSE] Accumulated content: {message_content}"
+                                )
+                            elif "message" in choice and "content" in choice["message"]:
+                                message_content = choice["message"]["content"]
+                                collected_output += message_content
+                                self.log_debug(
+                                    f"[USE_MOA_RESPONSE] Accumulated content: {message_content}"
+                                )
+                            else:
+                                self.log_debug(
+                                    f"[USE_MOA_RESPONSE] No 'content' found in 'delta' or 'message' for chunk: {chunk_str}"
+                                )
+                        else:
+                            self.log_debug(
+                                f"[USE_MOA_RESPONSE] Unexpected 'choices' structure in chunk: {chunk_str}"
+                            )
+
+                    except json.JSONDecodeError as e:
+                        self.log_debug(
+                            f"[USE_MOA_RESPONSE] JSON decoding error: {e} for chunk: {chunk_str}"
+                        )
+                    except Exception as e:
+                        self.log_debug(
+                            f"[USE_MOA_RESPONSE] Error processing chunk: {e}"
+                        )
+
+                self.consensus_output = collected_output.strip()
+            else:
+                # Handle non-streaming response
+                if hasattr(response, "json"):
+                    response_data = await response.json()
+                else:
+                    response_data = response  # Assume it's already a dict
+
+                self.log_debug(
+                    f"[USE_MOA_RESPONSE] Parsed response data: {response_data}"
+                )
+
+                # Extract the consensus output
+                self.consensus_output = response_data.get("consensus", "").strip()
+
             self.log_debug(
                 f"[USE_MOA_RESPONSE] Consensus output: {self.consensus_output}"
             )
@@ -1160,7 +1332,8 @@ class Pipe:
                     "role": message["role"],
                     "content": (
                         self.clean_message_content(message.get("content", ""))
-                        if message["role"] == "assistant"
+                        if self.valves.strip_collapsible_tags
+                        and message["role"] == "assistant"
                         else message.get("content", "")
                     ),
                 }
