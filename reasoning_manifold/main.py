@@ -1,6 +1,6 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.8b
+version: 0.4.8c
 
 - [x] Updated to work on OWUI 0.4.x
 - [x] OpenAI streaming
@@ -919,7 +919,7 @@ class Pipe:
             content_cleaned = tag_pattern.sub("", content)
 
             # Preserve internal whitespace and ensure no leading/trailing newlines
-            content_cleaned = content_cleaned.strip("\n")
+            content_cleaned = content_cleaned  # .strip("\n")
 
             # Log the before-and-after of the content cleaning
             self.log_debug(f"[EMIT_OUTPUT] Raw content: {content}")
