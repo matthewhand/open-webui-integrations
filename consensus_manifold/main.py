@@ -142,6 +142,12 @@ class Pipe:
             default=False,
             description="Enable or disable stripping of <details> HTML tags from assistant messages.",
         )
+        append_system_prompt: bool = Field(
+            default=False,
+            description=(
+                "If True, appends the system message to every user request, enclosed in parentheses."
+            ),
+        )
         debug_valve: bool = Field(default=True, description="Enable debug logging.")
 
     def __init__(self):
@@ -162,6 +168,15 @@ class Pipe:
         self.last_summary_model_index: int = 0
         self.last_emit_time: float = 0.0
         self.current_mode: Optional[str] = None  # Stores current selection mode
+        self.buffer: str = ""  # Initialize buffer
+        self.output_buffer_tokens: List[str] = []  # Buffer for output parsing
+        self.output_buffer_limit: int = (
+            5  # Number of tokens to buffer for tag detection
+        )
+        self.summary_in_progress: bool = False  # Flag to indicate summary generation
+        self.final_status_emitted: bool = (
+            False  # Flag to indicate if final status is emitted
+        )
 
         # Logging Setup
         self.log = logging.getLogger(self.__class__.__name__)
@@ -191,7 +206,12 @@ class Pipe:
         self.last_summary_model_index = 0
         self.last_emit_time = 0.0
         self.stop_emitter.clear()
+        self.output_buffer_tokens = []
+        self.buffer = ""
+        self.summary_in_progress = False
+        self.final_status_emitted = False
         self.log_debug("[RESET_STATE] State variables have been reset.")
+        self.start_time = time.time()  # Start time of the current pipe execution
 
     def log_debug(self, message: str):
         """Log debug messages with Request ID if available."""
@@ -200,25 +220,6 @@ class Pipe:
                 self.log.debug(f"[Request {self.request_id}] {message}")
             else:
                 self.log.debug(message)
-
-    def determine_mode(self, meta_model_id: str) -> str:
-        """
-        Determine the selection mode based on the meta-model ID.
-
-        Args:
-            meta_model_id (str): The meta-model ID stripped of the manifold prefix.
-
-        Returns:
-            str: The selection mode ('random', 'explicit', 'tags', 'unsupported').
-        """
-        if meta_model_id.startswith("random"):
-            return "random"
-        elif meta_model_id.startswith("explicit"):
-            return "explicit"
-        elif meta_model_id.startswith("tag"):
-            return "tags"
-        else:
-            return "unsupported"
 
     def parse_tags(self, tags_str: str) -> List[str]:
         """
@@ -239,6 +240,25 @@ class Pipe:
         tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()]
         self.log_debug(f"[PARSE_TAGS] Parsed tags: {tags}")
         return tags
+
+    def determine_mode(self, meta_model_id: str) -> str:
+        """
+        Determine the selection mode based on the meta-model ID.
+
+        Args:
+            meta_model_id (str): The meta-model ID stripped of the manifold prefix.
+
+        Returns:
+            str: The selection mode ('random', 'explicit', 'tags', 'unsupported').
+        """
+        if meta_model_id.startswith("random"):
+            return "random"
+        elif meta_model_id.startswith("explicit"):
+            return "explicit"
+        elif meta_model_id.startswith("tag"):
+            return "tags"
+        else:
+            return "unsupported"
 
     async def determine_contributing_models(
         self, body: dict, __user__: Optional[dict] = None
@@ -410,6 +430,7 @@ class Pipe:
                     }
                     for message in messages
                 ],
+                "stream": True,  # Enable streaming for contributing models
             }
             for model in models
         }
@@ -463,194 +484,6 @@ class Pipe:
 
         self.log_debug(f"[PIPES] Final registered categories: {model_categories}")
         return model_categories
-
-    async def pipe(
-        self,
-        body: dict,
-        __user__: Optional[dict] = None,
-        __event_emitter__: Callable[[dict], Awaitable[None]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Main handler for processing requests with retry logic for random contributing models.
-
-        Steps:
-        1. Reset state variables for each new request.
-        2. Validate selection methods.
-        3. Determine contributing models to query based on valves and configuration.
-        4. Handle system messages, including overrides if enabled.
-        5. Prepare payloads for the selected contributing models.
-        6. Query the selected contributing models while managing retries for random mode.
-        7. Generate consensus using the selected consensus model after all contributing models complete.
-        8. Return the consensus output or an error message in a standardized format.
-        """
-        self.reset_state()
-        self.request_id = uuid.uuid4()
-        self.log_debug(f"[PIPE] Initiating new pipe with Request ID: {self.request_id}")
-
-        try:
-            # Step 1: Validate Selection Methods
-            if not (
-                self.valves.enable_random_contributors
-                or self.valves.enable_explicit_contributors
-                or self.valves.enable_tagged_contributors
-            ):
-                raise ValueError(
-                    "[PIPE] At least one of enable_random_contributors, enable_explicit_contributors, or enable_tagged_contributors must be enabled."
-                )
-
-            # Step 2: Determine Contributing Models to Query
-            contributing_models = await self.determine_contributing_models(
-                body, __user__
-            )
-            if not contributing_models:
-                raise ValueError("[PIPE] No contributing models selected for query.")
-            self.log_debug(
-                f"[PIPE] Selected contributing models for query: {contributing_models}"
-            )
-
-            # Step 3: Handle System Messages
-            body_messages = body.get("messages", [])
-            system_message, messages = pop_system_message(body_messages)
-
-            if (
-                self.valves.enable_llm_summaries
-                and self.valves.progress_summary_system_prompt
-            ):
-                add_or_update_system_message(
-                    self.valves.progress_summary_system_prompt, messages
-                )
-                self.log_debug(
-                    f"[PIPE] Overriding system message with: {self.valves.progress_summary_system_prompt}"
-                )
-            elif system_message:
-                system_message_content = get_content_from_message(system_message)
-                add_or_update_system_message(system_message_content, messages)
-                self.log_debug(
-                    f"[PIPE] Using provided system message: {system_message_content}"
-                )
-
-            self.log_debug(
-                f"[PIPE] Total number of messages after processing system message: {len(messages)}"
-            )
-
-            # Step 4: Prepare Payloads
-            payloads = await self.prepare_payloads(contributing_models, messages)
-
-            # Step 5: Start the Progress Summarizer before querying
-            if self.valves.enable_llm_summaries:
-                progress_summary_task = asyncio.create_task(
-                    self.progress_summary_manager(
-                        contributing_models, __event_emitter__
-                    )
-                )
-                self.log_debug("[PIPE] Progress summarizer task started.")
-            else:
-                progress_summary_task = None
-
-            # Step 6: Query Contributing Models with Retry for Random Mode
-            retries = {model["id"]: 0 for model in contributing_models}
-            max_retries = self.valves.max_reroll_retries
-            query_results = {}
-
-            remaining_models = contributing_models.copy()
-
-            while remaining_models:
-                query_tasks = [
-                    asyncio.create_task(
-                        self.query_contributing_model(
-                            model["id"], payloads[model["id"]]
-                        )
-                    )
-                    for model in remaining_models
-                ]
-
-                results = await asyncio.gather(*query_tasks, return_exceptions=True)
-
-                # Process results
-                failed_contributors = []
-                for i, result in enumerate(results):
-                    model_id = remaining_models[i]["id"]
-
-                    if isinstance(result, Exception):
-                        self.log_debug(
-                            f"[PIPE] Error querying contributing model {model_id}: {result}"
-                        )
-                        if retries[model_id] < max_retries:
-                            retries[model_id] += 1
-                            failed_contributors.append(
-                                remaining_models[i]
-                            )  # Retry this model
-                            self.log_debug(
-                                f"[PIPE] Retrying contributing model {model_id} (Retry {retries[model_id]})"
-                            )
-                            await asyncio.sleep(self.valves.reroll_backoff_delay)
-                        else:
-                            self.log_debug(
-                                f"[PIPE] Contributing model {model_id} exceeded retry limit."
-                            )
-                            self.interrupted_contributors.add(model_id)
-                    else:
-                        output = result.get("output", "")
-                        if "error" in result:
-                            self.log_debug(
-                                f"[PIPE] Contributing model {model_id} returned an error: {result['error']}"
-                            )
-                            self.interrupted_contributors.add(model_id)
-                        else:
-                            query_results[model_id] = output
-                            self.completed_contributors.add(model_id)
-                            self.log_debug(
-                                f"[PIPE] Contributing model {model_id} completed successfully."
-                            )
-
-                # Update the list of contributing models to retry
-                remaining_models = failed_contributors
-
-            # Ensure all contributing models have completed
-            self.model_outputs.update(query_results)
-
-            # Step 7: Generate Consensus after all contributing models have completed
-            consensus_model_id = (
-                body.get("model")
-                if body.get("model") != CONSENSUS_PLACEHOLDER
-                else self.valves.consensus_model_id
-            )
-            self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
-
-            await self.generate_consensus(__event_emitter__, consensus_model_id)
-
-            # Wait for the progress summarizer to finish if it was started
-            if self.valves.enable_llm_summaries and progress_summary_task:
-                progress_summary_task.cancel()
-                try:
-                    await progress_summary_task
-                except asyncio.CancelledError:
-                    self.log_debug("[PIPE] Progress summarizer task cancelled.")
-
-            # Step 8: Return the Consensus Output in a Standardized Format
-            if self.consensus_output:
-                return {"status": "success", "data": self.consensus_output}
-            else:
-                return {
-                    "status": "error",
-                    "message": "No consensus could be generated.",
-                }
-
-        except ValueError as ve:
-            self.log_debug(f"[PIPE] ValueError: {ve}")
-            if __event_emitter__:
-                await self.emit_status(__event_emitter__, "Error", str(ve), done=True)
-            return {"status": "error", "message": str(ve)}
-        except Exception as e:
-            self.log_debug(f"[PIPE] Exception: {e}")
-            if __event_emitter__:
-                await self.emit_status(
-                    __event_emitter__,
-                    "Error",
-                    f"Error: {str(e)}",
-                    done=True,
-                )
-            return {"status": "error", "message": str(e)}
 
     async def query_contributing_model(
         self, model_id: str, payload: dict
@@ -720,6 +553,8 @@ class Pipe:
                                 "content": f"{self.valves.progress_summary_status_prompt} Output from {model_id}: {output}",
                             },
                         ],
+                        "max_tokens": 60,
+                        "temperature": 0.5,
                     }
                     try:
                         summary_response = await generate_chat_completions(
@@ -876,7 +711,7 @@ class Pipe:
                 raise ValueError("[USE_MOA_RESPONSE] Model ID is not properly set.")
 
             payload = {
-                "model": consensus_model_id,  # Use the consensus model ID
+                "model": consensus_model_id,
                 "prompt": "Summarize the outputs below into a single response:",
                 "responses": [
                     {"model": model, "content": output}
@@ -902,12 +737,30 @@ class Pipe:
             await self.emit_output(
                 __event_emitter__, self.consensus_output, include_collapsible=True
             )
-        except Exception as e:
-            self.log_debug(f"[USE_MOA_RESPONSE] Error synthesizing response: {e}")
+        except json.JSONDecodeError as e:
+            self.log_debug(f"[USE_MOA_RESPONSE] JSON decoding error: {e}")
             await self.emit_status(
                 __event_emitter__,
                 "Error",
-                f"Fallback consensus generation failed: {str(e)}",
+                f"MOA model returned invalid JSON: {e}",
+                done=True,
+            )
+        except ValueError as e:
+            self.log_debug(f"[USE_MOA_RESPONSE] Value error: {e}")
+            await self.emit_status(
+                __event_emitter__,
+                "Error",
+                f"MOA model ID not properly set: {e}",
+                done=True,
+            )
+        except Exception as e:
+            self.log_debug(
+                f"[USE_MOA_RESPONSE] Unexpected error while synthesizing MOA response: {e}"
+            )
+            await self.emit_status(
+                __event_emitter__,
+                "Error",
+                f"Fallback consensus generation failed: {e}",
                 done=True,
             )
 
@@ -930,42 +783,56 @@ class Pipe:
             initial (bool): Indicates if this is the initial status update.
         """
         current_time = time.time()
-        elapsed_time = current_time - self.last_emit_time
+        elapsed_since_last_emit = current_time - self.last_emit_time
 
-        if elapsed_time < self.valves.emit_interval and not done:
-            # Skip emitting if the interval hasn't passed and it's not a final update
+        # Determine if we should emit the status
+        should_emit = False
+        if done:
+            should_emit = True  # Always emit final status
+        elif initial:
+            should_emit = True  # Always emit initial status
+        elif elapsed_since_last_emit >= self.valves.emit_interval:
+            should_emit = True  # Emit if emit_interval has passed
+
+        if not should_emit:
             self.log_debug(
-                f"[EMIT_STATUS] Skipping emission. Elapsed time: {elapsed_time:.2f}s, Emit interval: {self.valves.emit_interval}s."
+                f"[EMIT_STATUS] Skipping emission. Elapsed time since last emit: {elapsed_since_last_emit:.2f}s < emit_interval: {self.valves.emit_interval}s."
             )
-            return
+            return  # Skip emitting the status
 
-        if __event_emitter__:
-            if initial:
-                formatted_message = "Seeking Consensus"
-            elif done:
-                time_suffix = self.format_elapsed_time(elapsed_time)
-                formatted_message = f"Consensus took {time_suffix}"
-            else:
-                formatted_message = message if message else "Processing..."
+        # Calculate total elapsed time from start_time for final status
+        elapsed_time = current_time - self.start_time
+        minutes, seconds = divmod(int(elapsed_time), 60)
+        if minutes > 0:
+            time_suffix = f"{minutes}m {seconds}s"
+        else:
+            time_suffix = f"{seconds}s"
 
-            # Prepare the status event
-            event = {
-                "type": "status",
-                "data": {
-                    "description": formatted_message,
-                    "done": done,
-                },
-            }
-            self.log_debug(
-                f"[EMIT_STATUS] Attempting to emit status: {formatted_message}"
-            )
+        # Determine the appropriate status message
+        if initial:
+            formatted_message = "Seeking Consensus"
+        elif done:
+            formatted_message = f"Consensus took {time_suffix}"
+        else:
+            formatted_message = message if message else "Processing..."
 
-            try:
-                await __event_emitter__(event)
-                self.log_debug("[EMIT_STATUS] Status emitted successfully.")
-                self.last_emit_time = current_time  # Update the last emission time
-            except Exception as e:
-                self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
+        # Prepare the status event
+        event = {
+            "type": "status",
+            "data": {
+                "description": formatted_message,
+                "done": done,
+            },
+        }
+        self.log_debug(f"[EMIT_STATUS] Attempting to emit status: {formatted_message}")
+
+        try:
+            await __event_emitter__(event)
+            self.log_debug("[EMIT_STATUS] Status emitted successfully.")
+            # Update last_emit_time after successful emission
+            self.last_emit_time = current_time
+        except Exception as e:
+            self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
 
     def format_elapsed_time(self, elapsed: float) -> str:
         """
@@ -998,8 +865,8 @@ class Pipe:
         collapsible_content = "\n".join(
             f"""
 <details>
-    <summary>Model {model_id} Output</summary>
-    <pre>{self.escape_html(output.strip())}</pre>
+<summary>Model {model_id} Output</summary>
+<pre>{self.escape_html(output.strip())}</pre>
 </details>
 """.strip()
             for model_id, output in self.model_outputs.items()
@@ -1162,6 +1029,7 @@ class Pipe:
                 done=True,
             )
 
+    # Additional Methods (from the initial code)
     async def use_moa_response(self, __event_emitter__, consensus_model_id: str):
         """
         Use the current consensus_model_id for MOA response synthesis.
@@ -1210,6 +1078,7 @@ class Pipe:
                 done=True,
             )
 
+    # Implementing Emit Interval Limiter in emit_status
     async def emit_status(
         self,
         __event_emitter__: Callable[[dict], Awaitable[None]],
@@ -1229,153 +1098,299 @@ class Pipe:
             initial (bool): Indicates if this is the initial status update.
         """
         current_time = time.time()
-        elapsed_time = current_time - self.last_emit_time
+        elapsed_since_last_emit = current_time - self.last_emit_time
 
-        if elapsed_time < self.valves.emit_interval and not done:
-            # Skip emitting if the interval hasn't passed and it's not a final update
+        # Determine if we should emit the status
+        should_emit = False
+        if done:
+            should_emit = True  # Always emit final status
+        elif initial:
+            should_emit = True  # Always emit initial status
+        elif elapsed_since_last_emit >= self.valves.emit_interval:
+            should_emit = True  # Emit if emit_interval has passed
+
+        if not should_emit:
             self.log_debug(
-                f"[EMIT_STATUS] Skipping emission. Elapsed time: {elapsed_time:.2f}s, Emit interval: {self.valves.emit_interval}s."
+                f"[EMIT_STATUS] Skipping emission. Elapsed time since last emit: {elapsed_since_last_emit:.2f}s < emit_interval: {self.valves.emit_interval}s."
             )
-            return
+            return  # Skip emitting the status
 
-        if __event_emitter__:
-            if initial:
-                formatted_message = "Seeking Consensus"
-            elif done:
-                time_suffix = self.format_elapsed_time(elapsed_time)
-                formatted_message = f"Consensus took {time_suffix}"
-            else:
-                formatted_message = message if message else "Processing..."
-
-            # Prepare the status event
-            event = {
-                "type": "status",
-                "data": {
-                    "description": formatted_message,
-                    "done": done,
-                },
-            }
-            self.log_debug(
-                f"[EMIT_STATUS] Attempting to emit status: {formatted_message}"
-            )
-
-            try:
-                await __event_emitter__(event)
-                self.log_debug("[EMIT_STATUS] Status emitted successfully.")
-                self.last_emit_time = current_time  # Update the last emission time
-            except Exception as e:
-                self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
-
-    def format_elapsed_time(self, elapsed: float) -> str:
-        """
-        Format elapsed time into a readable string.
-
-        Args:
-            elapsed (float): Elapsed time in seconds.
-
-        Returns:
-            str: Formatted time string.
-        """
-        minutes, seconds = divmod(int(elapsed), 60)
+        # Calculate total elapsed time from start_time for final status
+        elapsed_time = current_time - self.start_time
+        minutes, seconds = divmod(int(elapsed_time), 60)
         if minutes > 0:
-            return f"{minutes}m {seconds}s"
+            time_suffix = f"{minutes}m {seconds}s"
         else:
-            return f"{seconds}s"
+            time_suffix = f"{seconds}s"
 
-    async def emit_collapsible(self, __event_emitter__) -> None:
+        # Determine the appropriate status message
+        if initial:
+            formatted_message = "Seeking Consensus"
+        elif done:
+            formatted_message = f"Consensus took {time_suffix}"
+        else:
+            formatted_message = message if message else "Processing..."
+
+        # Prepare the status event
+        event = {
+            "type": "status",
+            "data": {
+                "description": formatted_message,
+                "done": done,
+            },
+        }
+        self.log_debug(f"[EMIT_STATUS] Attempting to emit status: {formatted_message}")
+
+        try:
+            await __event_emitter__(event)
+            self.log_debug("[EMIT_STATUS] Status emitted successfully.")
+            # Update last_emit_time after successful emission
+            self.last_emit_time = current_time
+        except Exception as e:
+            self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
+
+    # Implementing Final Status Emission
+    async def emit_final_status(self, __event_emitter__):
         """
-        Emit a collapsible section containing outputs from all contributing models.
+        Emit the final status message indicating the duration of the consensus process.
 
         Args:
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
         """
-        if not self.model_outputs:
-            self.log_debug("[EMIT_COLLAPSIBLE] No model outputs to emit.")
+        if self.final_status_emitted:
+            self.log_debug("[FINAL_STATUS] Final status already emitted.")
             return
 
-        # Generate collapsible sections for each model
-        collapsible_content = "\n".join(
-            f"""
-<details>
-    <summary>Model {model_id} Output</summary>
-    <pre>{self.escape_html(output.strip())}</pre>
-</details>
-""".strip()
-            for model_id, output in self.model_outputs.items()
-        )
+        # Calculate elapsed time
+        elapsed_time = time.time() - self.start_time
 
-        self.log_debug("[EMIT_COLLAPSIBLE] Collapsible content generated.")
+        # Format elapsed time
+        minutes, seconds = divmod(int(elapsed_time), 60)
+        if minutes > 0:
+            time_suffix = f"{minutes}m {seconds}s"
+        else:
+            time_suffix = f"{seconds}s"
 
-        # Emit the collapsible message
-        message_event = {
-            "type": "message",
-            "data": {"content": collapsible_content},
-        }
-        try:
-            await __event_emitter__(message_event)
-            self.log_debug("[EMIT_COLLAPSIBLE] Collapsible emitted successfully.")
-        except Exception as e:
-            self.log_debug(f"[EMIT_COLLAPSIBLE] Error emitting collapsible: {e}")
+        # Prepare the final status message
+        formatted_message = f"Consensus completed in {time_suffix}"
+        self.log_debug(f"[FINAL_STATUS] Emitting final status: {formatted_message}")
 
-    async def emit_output(
-        self, __event_emitter__, content: str, include_collapsible: bool = False
-    ) -> None:
+        # Emit the final status
+        await self.emit_status(__event_emitter__, "Info", formatted_message, done=True)
+        self.final_status_emitted = True
+
+    async def pipe(
+        self,
+        body: dict,
+        __user__: Optional[dict] = None,
+        __event_emitter__: Callable[[dict], Awaitable[None]] = None,
+    ) -> Dict[str, Any]:
         """
-        Emit content and optionally include a collapsible section with model outputs.
+        Main handler for processing requests with retry logic for random contributing models.
+
+        Steps:
+        1. Reset state variables for each new request.
+        2. Validate selection methods.
+        3. Determine contributing models to query based on valves and configuration.
+        4. Handle system messages, including overrides if enabled.
+        5. Prepare payloads for the selected contributing models.
+        6. Query the selected contributing models while managing retries for random mode.
+        7. Generate consensus using the selected consensus model after all contributing models complete.
+        8. Return the consensus output or an error message in a standardized format.
 
         Args:
+            body (dict): The incoming request payload.
+            __user__ (Optional[dict]): The user information.
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-            content (str): The main content to emit.
-            include_collapsible (bool): Whether to include collapsibles with the output.
-        """
-        if __event_emitter__ and content:
-            # Clean the main content
-            content_cleaned = content.strip("\n").strip()
-            self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
-
-            # Prepare the message event
-            main_message_event = {
-                "type": "message",
-                "data": {"content": content_cleaned},
-            }
-
-            try:
-                # Emit the main content
-                await __event_emitter__(main_message_event)
-                self.log_debug(
-                    "[EMIT_OUTPUT] Main output message emitted successfully."
-                )
-
-                # Optionally emit collapsible content
-                if include_collapsible and self.valves.use_collapsible:
-                    await self.emit_collapsible(__event_emitter__)
-            except Exception as e:
-                self.log_debug(
-                    f"[EMIT_OUTPUT] Error emitting output or collapsible: {e}"
-                )
-
-    def escape_html(self, text: str) -> str:
-        """
-        Escape HTML characters in the text to prevent rendering issues.
-
-        Args:
-            text (str): The text to escape.
 
         Returns:
-            str: Escaped text.
+            Dict[str, Any]: The consensus output or an error message.
         """
-        return html.escape(text)
+        # Reset state for the new request
+        self.reset_state()
+        self.request_id = uuid.uuid4()
+        self.log_debug(f"[PIPE] Starting new request with ID: {self.request_id}")
 
-    def clean_message_content(self, content: str) -> str:
-        """
-        Remove <details> HTML tags and their contents from the message content.
+        try:
+            # Step 1: Validate Selection Methods
+            if not (
+                self.valves.enable_random_contributors
+                or self.valves.enable_explicit_contributors
+                or self.valves.enable_tagged_contributors
+            ):
+                raise ValueError(
+                    "[PIPE] At least one contributor selection method must be enabled."
+                )
 
-        Args:
-            content (str): The message content.
+            # Step 2: Determine Contributing Models
+            contributing_models = await self.determine_contributing_models(
+                body, __user__
+            )
+            if not contributing_models:
+                raise ValueError("[PIPE] No contributing models selected for query.")
+            self.log_debug(
+                f"[PIPE] Selected contributing models: {contributing_models}"
+            )
 
-        Returns:
-            str: Cleaned message content.
-        """
-        # This ensures that existing collapsible tags are not nested or interfere with new ones
-        details_pattern = r"<details>\s*<summary>.*?</summary>\s*.*?</details>"
-        return re.sub(details_pattern, "", content, flags=re.DOTALL).strip()
+            # Step 3: Handle System Messages
+            body_messages = body.get("messages", [])
+            system_message, messages = pop_system_message(body_messages)
+
+            # Append system prompt if valve is enabled
+            if self.valves.append_system_prompt:
+                system_prompt = (
+                    self.valves.consensus_system_prompt
+                    if self.valves.system_message_override_enabled
+                    else get_content_from_message(system_message)
+                )
+                for message in messages:
+                    if message["role"] == "user":
+                        original_content = message.get("content", "")
+                        message["content"] = f"{original_content} ({system_prompt})"
+                        self.log_debug(
+                            f"[PIPE] Appended system prompt to user message: {message['content']}"
+                        )
+
+            # Override system message if enabled
+            if self.valves.system_message_override_enabled:
+                add_or_update_system_message(
+                    self.valves.consensus_system_prompt, messages
+                )
+                self.log_debug(
+                    f"[PIPE] Overriding system message with: {self.valves.consensus_system_prompt}"
+                )
+            elif system_message:
+                system_message_content = get_content_from_message(system_message)
+                add_or_update_system_message(system_message_content, messages)
+                self.log_debug(
+                    f"[PIPE] Using provided system message: {system_message_content}"
+                )
+
+            self.messages = messages
+
+            # Preprocess messages
+            processed_messages = [
+                {
+                    "role": message["role"],
+                    "content": (
+                        self.clean_message_content(message.get("content", ""))
+                        if message["role"] == "assistant"
+                        else message.get("content", "")
+                    ),
+                }
+                for message in messages
+            ]
+
+            # Step 4: Prepare Payloads for Contributing Models
+            payloads = await self.prepare_payloads(
+                contributing_models, processed_messages
+            )
+            self.log_debug("[PIPE] Prepared payloads for contributing models.")
+
+            # Step 5: Start Progress Summarizer if enabled
+            if self.valves.enable_llm_summaries:
+                progress_summary_task = asyncio.create_task(
+                    self.progress_summary_manager(
+                        contributing_models, __event_emitter__
+                    )
+                )
+                self.log_debug("[PIPE] Started progress summarizer task.")
+            else:
+                progress_summary_task = None
+
+            # Step 6: Query Contributing Models with Retry Logic
+            retries = {model["id"]: 0 for model in contributing_models}
+            max_retries = self.valves.max_reroll_retries
+            query_results = {}
+            remaining_models = contributing_models.copy()
+
+            while remaining_models:
+                query_tasks = [
+                    asyncio.create_task(
+                        self.query_contributing_model(
+                            model["id"], payloads[model["id"]]
+                        )
+                    )
+                    for model in remaining_models
+                ]
+                results = await asyncio.gather(*query_tasks, return_exceptions=True)
+
+                failed_contributors = []
+                for i, result in enumerate(results):
+                    model_id = remaining_models[i]["id"]
+
+                    if isinstance(result, Exception):
+                        self.log_debug(
+                            f"[PIPE] Error querying model {model_id}: {result}"
+                        )
+                        if retries[model_id] < max_retries:
+                            retries[model_id] += 1
+                            failed_contributors.append(remaining_models[i])
+                            self.log_debug(
+                                f"[PIPE] Retrying model {model_id} (Attempt {retries[model_id]})"
+                            )
+                            await asyncio.sleep(self.valves.reroll_backoff_delay)
+                        else:
+                            self.log_debug(
+                                f"[PIPE] Model {model_id} exceeded retry limit."
+                            )
+                            self.interrupted_contributors.add(model_id)
+                    else:
+                        output = result.get("output", "")
+                        if "error" in result:
+                            self.log_debug(
+                                f"[PIPE] Model {model_id} error: {result['error']}"
+                            )
+                            self.interrupted_contributors.add(model_id)
+                        else:
+                            query_results[model_id] = output
+                            self.completed_contributors.add(model_id)
+                            self.log_debug(
+                                f"[PIPE] Model {model_id} completed successfully."
+                            )
+
+                remaining_models = failed_contributors
+
+            # Update model outputs
+            self.model_outputs.update(query_results)
+
+            # Step 7: Generate Consensus
+            consensus_model_id = (
+                body.get("model")
+                if body.get("model") != CONSENSUS_PLACEHOLDER
+                else self.valves.consensus_model_id
+            )
+            self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
+            await self.generate_consensus(__event_emitter__, consensus_model_id)
+
+            # Step 8: Clean Up and Finalize
+            if progress_summary_task:
+                progress_summary_task.cancel()
+                try:
+                    await progress_summary_task
+                except asyncio.CancelledError:
+                    self.log_debug("[PIPE] Progress summarizer task cancelled.")
+
+            if not self.final_status_emitted:
+                await self.emit_final_status(__event_emitter__)
+                self.final_status_emitted = True
+
+            # Return the consensus output
+            if self.consensus_output:
+                return {"status": "success", "data": self.consensus_output}
+            else:
+                return {
+                    "status": "error",
+                    "message": "No consensus could be generated.",
+                }
+
+        except Exception as e:
+            self.log_debug(f"[PIPE] Unexpected error: {e}")
+            if __event_emitter__:
+                await self.emit_status(
+                    __event_emitter__,
+                    "Error",
+                    f"Error processing request: {str(e)}",
+                    done=True,
+                )
+            return {"status": "error", "message": str(e)}
