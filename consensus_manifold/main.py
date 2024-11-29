@@ -1,11 +1,3 @@
-"""
-title: Consensus Manifold
-author: open-webui
-author_url: https://github.com/open-webui
-funding_url: https://github.com/open-webui
-version: 0.5
-"""
-
 import os
 import json
 import time
@@ -13,23 +5,18 @@ import asyncio
 import random
 import uuid
 import html
-from typing import List, Union, Optional, Callable, Awaitable, Dict, Any
+from typing import List, Optional, Callable, Awaitable, Dict, Any, Union
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import pop_system_message, add_or_update_system_message
-from starlette.responses import StreamingResponse
+from open_webui.utils.misc import pop_system_message
+from starlette.responses import StreamingResponse, JSONResponse
 from open_webui.main import (
     generate_chat_completions,
     generate_moa_response,
-    get_task_model_id,
 )
-from open_webui.utils.misc import get_last_assistant_message, get_content_from_message
-from open_webui.config import TASK_MODEL, TASK_MODEL_EXTERNAL
-from open_webui.apps.webui.routers.chats import get_all_user_tags
 
 import logging
 import re  # For regex operations
 
-from fastapi import HTTPException, status
 
 # Mock the user object as expected by the function (OWUI 0.5.x constraint)
 mock_user = {
@@ -280,9 +267,7 @@ class Pipe:
         # Extract and strip the meta-model ID using the manifold prefix
         model_id = body.get("model", "")
         if self.valves.manifold_prefix in model_id:
-            meta_model = model_id.split(self.valves.manifold_prefix, 1)[
-                1
-            ]  # Strip prefix
+            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # Strip prefix
             self.log_debug(f"Stripped meta-model ID: {meta_model}")
         else:
             meta_model = model_id
@@ -502,98 +487,24 @@ class Pipe:
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Received StreamingResponse from {model_id}. Processing stream."
                 )
-                collected_output = ""
-                async for chunk in response.body_iterator:
-                    try:
-                        if isinstance(chunk, bytes):
-                            chunk_str = chunk.decode("utf-8")
-                        elif isinstance(chunk, str):
-                            chunk_str = chunk
-                        else:
-                            self.log_debug(
-                                f"[QUERY_CONTRIBUTOR] Unexpected chunk type: {type(chunk)}"
-                            )
-                            continue
-
-                        self.log_debug(
-                            f"[QUERY_CONTRIBUTOR] Received chunk: {chunk_str}"
-                        )
-
-                        # Strip 'data: ' prefix if present
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[6:].strip()
-
-                        if chunk_str == "[DONE]":
-                            self.log_debug(
-                                "[QUERY_CONTRIBUTOR] Received [DONE] signal. Ending stream."
-                            )
-                            break
-
-                        if not chunk_str:
-                            continue  # Skip empty chunks
-
-                        # Parse the chunk
-                        data = json.loads(chunk_str)
-
-                        # Handle unexpected but valid responses with no 'content'
-                        if "choices" in data and len(data["choices"]) > 0:
-                            choice = data["choices"][0]
-                            if choice.get("finish_reason") == "stop" and not choice.get(
-                                "delta", {}
-                            ).get("content"):
-                                self.log_debug(
-                                    f"[QUERY_CONTRIBUTOR] No 'content' in chunk. Ignoring: {chunk_str}"
-                                )
-                                continue
-
-                            # Check for 'delta' or 'message'
-                            if "delta" in choice and "content" in choice["delta"]:
-                                message_content = choice["delta"]["content"]
-                                collected_output += message_content
-                                self.log_debug(
-                                    f"[QUERY_CONTRIBUTOR] Accumulated content: {message_content}"
-                                )
-                            elif "message" in choice and "content" in choice["message"]:
-                                message_content = choice["message"]["content"]
-                                collected_output += message_content
-                                self.log_debug(
-                                    f"[QUERY_CONTRIBUTOR] Accumulated content: {message_content}"
-                                )
-                            else:
-                                self.log_debug(
-                                    f"[QUERY_CONTRIBUTOR] No 'content' found in 'delta' or 'message' for chunk: {chunk_str}"
-                                )
-                        else:
-                            self.log_debug(
-                                f"[QUERY_CONTRIBUTOR] Unexpected structure in chunk: {chunk_str}"
-                            )
-
-                    except json.JSONDecodeError as e:
-                        self.log_debug(
-                            f"[QUERY_CONTRIBUTOR] JSON decoding error: {e} for chunk: {chunk_str}"
-                        )
-                    except Exception as e:
-                        self.log_debug(
-                            f"[QUERY_CONTRIBUTOR] Error processing chunk: {e}"
-                        )
-
+                collected_output = await self.handle_streaming_response(response)
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Collected output from {model_id}: {collected_output}"
                 )
                 return {"model": model_id, "output": collected_output}
 
-            else:
-                # Handle non-streaming response
-                output = (
-                    response.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .rstrip("\n")
-                )
+            elif isinstance(response, dict):
+                output = response.get("choices", [{}])[0].get("message", {}).get("content", "").rstrip("\n")
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {output}"
                 )
                 return {"model": model_id, "output": output}
+
+            else:
+                self.log_debug(
+                    f"[QUERY_CONTRIBUTOR] Unexpected response type: {type(response)}"
+                )
+                return {"model": model_id, "error": "Unexpected response type."}
 
         except Exception as e:
             self.log_debug(
@@ -601,108 +512,131 @@ class Pipe:
             )
             return {"model": model_id, "error": str(e)}
 
-    async def progress_summary_manager(
-        self,
-        contributing_models: List[Dict[str, str]],
-        __event_emitter__: Callable[[dict], Awaitable[None]],
-    ):
+    async def handle_json_response(self, response: Union[JSONResponse, bytes, str]) -> dict:
         """
-        Manage the emission of progress summaries.
+        Handle and parse a JSON response from a JSONResponse object or raw content.
 
         Args:
-            contributing_models (List[Dict[str, str]]): List of contributing models being queried.
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-        """
-        try:
-            while True:
-                await asyncio.sleep(self.valves.progress_summary_interval_seconds)
-                if self.valves.enable_llm_summaries:
-                    # Select the contributing model with the most buffered tokens
-                    model_id = self.select_model_with_most_buffered_tokens()
-                    if not model_id:
-                        self.log_debug(
-                            "[PROGRESS_SUMMARY] No contributing models left to summarize."
-                        )
-                        break  # Exit if no models are left to summarize
-
-                    output = self.model_outputs.get(model_id, "No output yet.")
-                    summary_payload = {
-                        "model": self.valves.progress_summary_model_id,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": self.valves.progress_summary_system_prompt,
-                            },
-                            {
-                                "role": "user",
-                                "content": f"{self.valves.progress_summary_status_prompt} Output from {model_id}: {output}",
-                            },
-                        ],
-                        "max_tokens": 60,
-                        "temperature": 0.5,
-                    }
-                    try:
-                        summary_response = await generate_chat_completions(
-                            form_data=summary_payload,
-                            user=mock_user,
-                            bypass_filter=True,
-                        )
-                        summary = (
-                            summary_response["choices"][0]["message"]["content"]
-                            .rstrip("\n")
-                            .strip()
-                        )
-                        await self.emit_status(
-                            __event_emitter__,
-                            "Info",
-                            f"Progress Summary for {model_id}: {summary}",
-                        )
-                        self.log_debug(
-                            f"[PROGRESS_SUMMARY] Emitted summary for {model_id}: {summary}"
-                        )
-                    except Exception as e:
-                        self.log_debug(
-                            f"[PROGRESS_SUMMARY] Error generating summary for {model_id}: {e}"
-                        )
-
-                    # Update index for round-robin
-                    self.last_summary_model_index = (
-                        self.last_summary_model_index + 1
-                    ) % len(contributing_models)
-                else:
-                    self.log_debug(
-                        "[PROGRESS_SUMMARY_MANAGER] LLM summaries are disabled."
-                    )
-        except asyncio.CancelledError:
-            self.log_debug(
-                "[PROGRESS_SUMMARY_MANAGER] Progress summarizer task cancelled."
-            )
-        except Exception as e:
-            self.log_debug(f"[PROGRESS_SUMMARY_MANAGER] Unexpected error: {e}")
-
-    def select_model_with_most_buffered_tokens(self) -> Optional[str]:
-        """
-        Select the contributing model with the most buffered tokens for summarization.
+            response (JSONResponse or bytes or str): The response to parse.
 
         Returns:
-            Optional[str]: The ID of the selected model, or None if no models are available.
+            dict: Parsed JSON data.
+
+        Raises:
+            TypeError: If the response content is not bytes or str.
+            ValueError: If the response does not contain valid JSON.
         """
-        if not self.model_outputs:
-            return None
+        if isinstance(response, JSONResponse):
+            try:
+                raw_content = response.body  # Access the bytes content
+                decoded_body = raw_content.decode("utf-8")
+                self.log_debug(f"[HANDLE_JSON_RESPONSE] Decoded body: {decoded_body}")
+            except UnicodeDecodeError as e:
+                self.log_debug(f"[HANDLE_JSON_RESPONSE] Chunk decode error: {e}")
+                raise ValueError("Failed to decode bytes to string.") from e
+        elif isinstance(response, bytes):
+            try:
+                decoded_body = response.decode("utf-8")
+            except UnicodeDecodeError as e:
+                self.log_debug(f"[HANDLE_JSON_RESPONSE] Chunk decode error: {e}")
+                raise ValueError("Failed to decode bytes to string.") from e
+        elif isinstance(response, str):
+            decoded_body = response
+        else:
+            self.log_debug(
+                f"[HANDLE_JSON_RESPONSE] Unexpected content type: {type(response)}"
+            )
+            raise TypeError("Expected response content to be bytes or str.")
 
-        # Get all contributing models that have completed
-        available_models = list(self.model_outputs.keys())
+        try:
+            # Parse the JSON content
+            response_data = json.loads(decoded_body)
+            self.log_debug(f"[HANDLE_JSON_RESPONSE] Parsed response data: {response_data}")
+            return response_data
+        except json.JSONDecodeError as e:
+            self.log_debug(
+                f"[HANDLE_JSON_RESPONSE] JSON decoding error: {e}. Response content: {decoded_body[:100]}"
+            )
+            raise ValueError("Invalid JSON in response.") from e
 
-        if not available_models:
-            return None
+    async def handle_streaming_response(self, response: StreamingResponse) -> str:
+        """
+        Handle and accumulate a StreamingResponse.
 
-        # Select the next model in round-robin
-        model_id = available_models[
-            self.last_summary_model_index % len(available_models)
-        ]
-        return model_id
+        Args:
+            response (StreamingResponse): The StreamingResponse object.
+
+        Returns:
+            str: The accumulated response content.
+        """
+        collected_output = ""
+
+        async for chunk in response.body_iterator:
+            try:
+                # Decode chunk to string if it's bytes
+                if isinstance(chunk, bytes):
+                    try:
+                        chunk_str = chunk.decode("utf-8")
+                    except UnicodeDecodeError as e:
+                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Chunk decode error: {e}")
+                        continue
+                elif isinstance(chunk, str):
+                    chunk_str = chunk
+                else:
+                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected chunk type: {type(chunk)}")
+                    continue
+
+                self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Received chunk: {chunk_str}")
+
+                # Strip 'data: ' prefix if present
+                if chunk_str.startswith("data: "):
+                    chunk_str = chunk_str[6:].strip()
+
+                # End the stream if '[DONE]' signal is received
+                if chunk_str == "[DONE]":
+                    self.log_debug("[HANDLE_STREAMING_RESPONSE] Received [DONE] signal. Ending stream.")
+                    break
+
+                # Skip empty chunks
+                if not chunk_str:
+                    continue
+
+                # Parse JSON content
+                try:
+                    data = json.loads(chunk_str)
+                    choice = data.get("choices", [{}])[0]
+                    message_content = ""
+                    if "delta" in choice and "content" in choice["delta"]:
+                        message_content = choice["delta"]["content"]
+                    elif "message" in choice and "content" in choice["message"]:
+                        message_content = choice["message"]["content"]
+
+                    # Append valid content to the collected output
+                    if message_content:
+                        collected_output += message_content.strip()
+                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
+                    else:
+                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
+
+                except json.JSONDecodeError as e:
+                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] JSON decoding error: {e} for chunk: {chunk_str}")
+                except Exception as e:
+                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Error processing JSON chunk: {e}")
+
+            except Exception as e:
+                self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
+
+        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Collected output: {collected_output}")
+        return collected_output.strip()
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
+        """
+        Generate consensus using the designated consensus model.
+
+        Args:
+            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+            consensus_model_id (str): The ID of the consensus model to use.
+        """
         self.log_debug(
             f"[GENERATE_CONSENSUS] Called with emitter: {__event_emitter__} and model ID: {consensus_model_id}"
         )
@@ -732,193 +666,69 @@ class Pipe:
         }
 
         try:
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}"
-            )
+            self.log_debug(f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}")
 
-            # Launch the consensus generation coroutine
-            consensus_response = await generate_moa_response(
-                form_data=payload, user=mock_user
-            )
+            # Call the consensus generation function directly
+            consensus_response = await generate_moa_response(form_data=payload, user=mock_user)
 
-            # Decode the response
-            response_data = (
-                consensus_response
-                if isinstance(consensus_response, dict)
-                else await consensus_response.json()
-            )
+            # Log the type of consensus_response
+            self.log_debug(f"[GENERATE_CONSENSUS] Type of consensus_response: {type(consensus_response)}")
 
-            # Extract the consensus output
-            self.consensus_output = response_data.get("consensus", "").strip()
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Consensus output: {self.consensus_output}"
-            )
+            # Handle based on response type
+            if isinstance(consensus_response, dict):
+                # Handle direct dict response
+                self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
+                self.consensus_output = consensus_response.get("consensus", "").strip()
+                await self.emit_output(
+                    __event_emitter__,
+                    f"Consensus response: {self.consensus_output}",
+                    include_collapsible=True,
+                )
+                await self.emit_status(__event_emitter__, "Completed", done=True)
 
-            # Emit the consensus output
-            await self.emit_output(
-                __event_emitter__, self.consensus_output, include_collapsible=True
-            )
+            elif isinstance(consensus_response, JSONResponse):
+                # Handle JSONResponse
+                self.log_debug(f"[GENERATE_CONSENSUS] Handling JSONResponse")
+                response_data = await self.handle_json_response(consensus_response)
+                self.consensus_output = response_data.get("consensus", "").strip()
+                await self.emit_output(
+                    __event_emitter__,
+                    f"Consensus response: {self.consensus_output}",
+                    include_collapsible=True,
+                )
+                await self.emit_status(__event_emitter__, "Completed", done=True)
 
-        except json.JSONDecodeError as e:
-            self.log_debug(f"[GENERATE_CONSENSUS] JSON decoding error: {e}")
-            await self.emit_status(
-                __event_emitter__,
-                "Error",
-                f"Consensus model returned invalid JSON: {e}",
-                done=True,
-            )
+            elif isinstance(consensus_response, StreamingResponse):
+                # Handle StreamingResponse
+                self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
+                collected_output = await self.handle_streaming_response(consensus_response)
+                self.consensus_output = collected_output
+                await self.emit_output(
+                    __event_emitter__,
+                    f"Consensus response: {self.consensus_output}",
+                    include_collapsible=True,
+                )
+                await self.emit_status(__event_emitter__, "Completed", done=True)
+
+            else:
+                # Handle unexpected response types
+                self.log_debug(
+                    f"[GENERATE_CONSENSUS] Unexpected response type: {type(consensus_response)}"
+                )
+                await self.emit_status(
+                    __event_emitter__,
+                    "Error",
+                    f"Unexpected response type: {type(consensus_response)}",
+                    done=True,
+                )
+
         except Exception as e:
+            # Log and emit the error
             self.log_debug(f"[GENERATE_CONSENSUS] Error generating consensus: {e}")
             await self.emit_status(
                 __event_emitter__,
                 "Error",
                 f"Consensus generation failed: {str(e)}",
-                done=True,
-            )
-
-    async def use_moa_response(self, __event_emitter__, consensus_model_id: str):
-        """
-        Use the current consensus_model_id for MOA response synthesis.
-
-        Args:
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-            consensus_model_id (str): The ID of the consensus model to use.
-        """
-        try:
-            if not consensus_model_id or consensus_model_id == CONSENSUS_PLACEHOLDER:
-                raise ValueError("[USE_MOA_RESPONSE] Model ID is not properly set.")
-
-            payload = {
-                "model": consensus_model_id,  # Use the consensus model ID
-                "prompt": "Summarize the outputs below into a single response:",
-                "responses": [
-                    {"model": model, "content": output}
-                    for model, output in self.model_outputs.items()
-                ],
-                "stream": False,
-            }
-            self.log_debug(f"[USE_MOA_RESPONSE] Fallback payload: {payload}")
-
-            # Call the generate_moa_response function
-            response = await generate_moa_response(form_data=payload, user=mock_user)
-
-            # Handle StreamingResponse if response is streaming
-            if isinstance(response, StreamingResponse):
-                self.log_debug(
-                    f"[USE_MOA_RESPONSE] MOA model {consensus_model_id} returned StreamingResponse. Processing stream."
-                )
-                collected_output = ""
-                async for chunk in response.body_iterator:
-                    try:
-                        # Decode chunk into string if bytes
-                        if isinstance(chunk, bytes):
-                            chunk_str = chunk.decode("utf-8")
-                        elif isinstance(chunk, str):
-                            chunk_str = chunk
-                        else:
-                            self.log_debug(
-                                f"[USE_MOA_RESPONSE] Unexpected chunk type: {type(chunk)}"
-                            )
-                            continue
-
-                        self.log_debug(
-                            f"[USE_MOA_RESPONSE] Received chunk: {chunk_str}"
-                        )
-
-                        # Strip 'data: ' prefix if present
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[6:].strip()
-
-                        if chunk_str == "[DONE]":  # End of stream
-                            self.log_debug(
-                                "[USE_MOA_RESPONSE] Received [DONE] signal. Ending stream."
-                            )
-                            break
-
-                        if not chunk_str:
-                            continue  # Skip empty chunks
-
-                        # Attempt to parse JSON content
-                        data = json.loads(chunk_str)
-
-                        # Handle both 'delta' and 'message' keys
-                        if "choices" in data and len(data["choices"]) > 0:
-                            choice = data["choices"][0]
-                            if "delta" in choice and "content" in choice["delta"]:
-                                message_content = choice["delta"]["content"]
-                                collected_output += message_content
-                                self.log_debug(
-                                    f"[USE_MOA_RESPONSE] Accumulated content: {message_content}"
-                                )
-                            elif "message" in choice and "content" in choice["message"]:
-                                message_content = choice["message"]["content"]
-                                collected_output += message_content
-                                self.log_debug(
-                                    f"[USE_MOA_RESPONSE] Accumulated content: {message_content}"
-                                )
-                            else:
-                                self.log_debug(
-                                    f"[USE_MOA_RESPONSE] No 'content' found in 'delta' or 'message' for chunk: {chunk_str}"
-                                )
-                        else:
-                            self.log_debug(
-                                f"[USE_MOA_RESPONSE] Unexpected 'choices' structure in chunk: {chunk_str}"
-                            )
-
-                    except json.JSONDecodeError as e:
-                        self.log_debug(
-                            f"[USE_MOA_RESPONSE] JSON decoding error: {e} for chunk: {chunk_str}"
-                        )
-                    except Exception as e:
-                        self.log_debug(
-                            f"[USE_MOA_RESPONSE] Error processing chunk: {e}"
-                        )
-
-                self.consensus_output = collected_output.strip()
-            else:
-                # Handle non-streaming response
-                if hasattr(response, "json"):
-                    response_data = await response.json()
-                else:
-                    response_data = response  # Assume it's already a dict
-
-                self.log_debug(
-                    f"[USE_MOA_RESPONSE] Parsed response data: {response_data}"
-                )
-
-                # Extract the consensus output
-                self.consensus_output = response_data.get("consensus", "").strip()
-
-            self.log_debug(
-                f"[USE_MOA_RESPONSE] Consensus output: {self.consensus_output}"
-            )
-            await self.emit_output(
-                __event_emitter__, self.consensus_output, include_collapsible=True
-            )
-        except json.JSONDecodeError as e:
-            self.log_debug(f"[USE_MOA_RESPONSE] JSON decoding error: {e}")
-            await self.emit_status(
-                __event_emitter__,
-                "Error",
-                f"MOA model returned invalid JSON: {e}",
-                done=True,
-            )
-        except ValueError as e:
-            self.log_debug(f"[USE_MOA_RESPONSE] Value error: {e}")
-            await self.emit_status(
-                __event_emitter__,
-                "Error",
-                f"MOA model ID not properly set: {e}",
-                done=True,
-            )
-        except Exception as e:
-            self.log_debug(
-                f"[USE_MOA_RESPONSE] Unexpected error while synthesizing MOA response: {e}"
-            )
-            await self.emit_status(
-                __event_emitter__,
-                "Error",
-                f"Fallback consensus generation failed: {e}",
                 done=True,
             )
 
@@ -984,6 +794,11 @@ class Pipe:
         }
         self.log_debug(f"[EMIT_STATUS] Attempting to emit status: {formatted_message}")
 
+        # Verify __event_emitter__ is callable
+        if not callable(__event_emitter__):
+            self.log_debug(f"[EMIT_STATUS] __event_emitter__ is not callable: {type(__event_emitter__)}")
+            raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+
         try:
             await __event_emitter__(event)
             self.log_debug("[EMIT_STATUS] Status emitted successfully.")
@@ -991,22 +806,6 @@ class Pipe:
             self.last_emit_time = current_time
         except Exception as e:
             self.log_debug(f"[EMIT_STATUS] Error emitting status: {e}")
-
-    def format_elapsed_time(self, elapsed: float) -> str:
-        """
-        Format elapsed time into a readable string.
-
-        Args:
-            elapsed (float): Elapsed time in seconds.
-
-        Returns:
-            str: Formatted time string.
-        """
-        minutes, seconds = divmod(int(elapsed), 60)
-        if minutes > 0:
-            return f"{minutes}m {seconds}s"
-        else:
-            return f"{seconds}s"
 
     async def emit_collapsible(self, __event_emitter__) -> None:
         """
@@ -1032,11 +831,17 @@ class Pipe:
 
         self.log_debug("[EMIT_COLLAPSIBLE] Collapsible content generated.")
 
-        # Emit the collapsible message
+        # Prepare the collapsible message
         message_event = {
             "type": "message",
             "data": {"content": collapsible_content},
         }
+
+        # Verify __event_emitter__ is callable
+        if not callable(__event_emitter__):
+            self.log_debug(f"[EMIT_COLLAPSIBLE] __event_emitter__ is not callable: {type(__event_emitter__)}")
+            raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+
         try:
             await __event_emitter__(message_event)
             self.log_debug("[EMIT_COLLAPSIBLE] Collapsible emitted successfully.")
@@ -1055,8 +860,13 @@ class Pipe:
             include_collapsible (bool): Whether to include collapsibles with the output.
         """
         if __event_emitter__ and content:
+            # Verify __event_emitter__ is callable
+            if not callable(__event_emitter__):
+                self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
+                raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+
             # Clean the main content
-            content_cleaned = content.strip("\n").strip()
+            content_cleaned = content.strip("\n")
             self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
 
             # Prepare the message event
@@ -1104,7 +914,23 @@ class Pipe:
         """
         # This ensures that existing collapsible tags are not nested or interfere with new ones
         details_pattern = r"<details>\s*<summary>.*?</summary>\s*.*?</details>"
-        return re.sub(details_pattern, "", content, flags=re.DOTALL).strip()
+        return re.sub(details_pattern, "", content, flags=re.DOTALL)
+
+    def format_elapsed_time(self, elapsed: float) -> str:
+        """
+        Format elapsed time into a readable string.
+
+        Args:
+            elapsed (float): Elapsed time in seconds.
+
+        Returns:
+            str: Formatted time string.
+        """
+        minutes, seconds = divmod(int(elapsed), 60)
+        if minutes > 0:
+            return f"{minutes}m {seconds}s"
+        else:
+            return f"{seconds}s"
 
     async def emit_final_status(self, __event_emitter__):
         """
@@ -1161,9 +987,12 @@ class Pipe:
         3. Determine contributing models to query based on valves and configuration.
         4. Handle system messages, including overrides if enabled.
         5. Prepare payloads for the selected contributing models.
-        6. Query the selected contributing models while managing retries for random mode.
-        7. Generate consensus using the selected consensus model after all contributing models complete.
-        8. Return the consensus output or an error message in a standardized format.
+        6. Emit initial status: "Seeking Consensus".
+        7. Query the selected contributing models while managing retries for random mode.
+        8. Emit contribution completion status.
+        9. Generate consensus using the selected consensus model after all contributing models complete.
+        10. Emit consensus completion status.
+        11. Return the consensus output or an error message in a standardized format.
 
         Args:
             body (dict): The incoming request payload.
@@ -1225,20 +1054,19 @@ class Pipe:
             )
             self.log_debug("[PIPE] Prepared payloads for contributing models.")
 
-            # Step 5: Start Progress Summarizer if enabled
-            progress_summary_task = None
-            if self.valves.enable_llm_summaries:
-                progress_summary_task = asyncio.create_task(
-                    self.progress_summary_manager(
-                        contributing_models, __event_emitter__
-                    )
-                )
-                self.log_debug("[PIPE] Started progress summarizer task.")
+            # Step 5: Emit Initial Status
+            await self.emit_status(
+                __event_emitter__,
+                "Info",
+                "Seeking Consensus",
+                initial=True,
+                done=False,
+            )
+            self.log_debug("[PIPE] Initial status 'Seeking Consensus' emitted.")
 
             # Step 6: Query Contributing Models with Retry Logic
             retries = {model["id"]: 0 for model in contributing_models}
             max_retries = self.valves.max_reroll_retries
-            query_results = {}
             remaining_models = contributing_models.copy()
 
             active_tasks = []
@@ -1285,11 +1113,11 @@ class Pipe:
                                 f"[PIPE] Model {model_id} error: {result['error']}"
                             )
                             self.interrupted_contributors.add(model_id)
-                        else:
-                            query_results[model_id] = output
+                        elif output.strip():
+                            self.model_outputs[model_id] = output
                             self.completed_contributors.add(model_id)
                             self.log_debug(
-                                f"[PIPE] Model {model_id} completed successfully."
+                                f"[PIPE] Model {model_id} completed successfully with output."
                             )
 
                 remaining_models = failed_contributors
@@ -1298,47 +1126,48 @@ class Pipe:
             await asyncio.gather(*active_tasks, return_exceptions=True)
             self.log_debug(f"[PIPE] All contributing model tasks are completed.")
 
-            # Step 7: Generate Consensus
-            consensus_model_id = None
+            # Step 7: Emit Contribution Completion Status
+            contribution_time = time.time() - self.start_time
+            contribution_time_str = self.format_elapsed_time(contribution_time)
+            await self.emit_status(
+                __event_emitter__,
+                "Info",
+                f"Contribution took {contribution_time_str}",
+                done=False,
+            )
+            self.log_debug(
+                f"[PIPE] Emitted contribution completion status: Contribution took {contribution_time_str}"
+            )
 
-            # Use the consensus model ID from the valves if it's valid
-            if (
+            # Step 8: Generate Consensus
+            consensus_model_id = (
                 self.valves.consensus_model_id
-                and self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER
-            ):
-                consensus_model_id = self.valves.consensus_model_id
-            # Otherwise, fallback to the body-provided model if it's valid
-            elif body.get("model") and body.get("model") != CONSENSUS_PLACEHOLDER:
-                consensus_model_id = body.get("model")
-
-            # Validate the selected consensus model ID
+                if self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER
+                else body.get("model")
+            )
             if not consensus_model_id:
-                self.log_debug("[PIPE] No valid consensus model ID found.")
-                await self.emit_status(
-                    __event_emitter__,
-                    "Error",
-                    "No valid consensus model ID provided. Consensus generation skipped.",
-                    done=True,
-                )
-                return {
-                    "status": "error",
-                    "message": "No valid consensus model ID provided.",
-                }
+                raise ValueError("[PIPE] No valid consensus model ID provided.")
 
             self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
             await self.generate_consensus(__event_emitter__, consensus_model_id)
 
-            # Step 8: Clean Up and Finalize
-            if progress_summary_task:
-                progress_summary_task.cancel()
-                try:
-                    await progress_summary_task
-                except asyncio.CancelledError:
-                    self.log_debug("[PIPE] Progress summarizer task cancelled.")
+            # Step 9: Emit Consensus Completion Status
+            consensus_time = time.time() - self.start_time
+            consensus_time_str = self.format_elapsed_time(consensus_time)
+            await self.emit_status(
+                __event_emitter__,
+                "Info",
+                f"Consensus took {consensus_time_str}",
+                done=True,
+            )
+            self.log_debug(
+                f"[PIPE] Emitted consensus completion status: Consensus took {consensus_time_str}"
+            )
 
-            if not self.final_status_emitted:
-                await self.emit_final_status(__event_emitter__)
-                self.final_status_emitted = True
+            # Step 10: Emit Final Consensus Output as a Message
+            if self.consensus_output:
+                await self.emit_output(__event_emitter__, self.consensus_output)
+                self.log_debug("[PIPE] Final consensus output emitted as a message.")
 
             # Return the consensus output
             if self.consensus_output:
