@@ -3,14 +3,12 @@ title: Open-WebUI Reasoning Manifold
 version: 0.4.7
 
 - [x] Updated to work on OWUI 0.4.x
-- [x] OpenAI Streaming
-- [x] Ollama Streaming
-- [x] Emit collapsible
+- [x] OpenAI streaming
+- [x] Ollama streaming
+- [x] Thought expansion
 - [x] LLM summary generation
-- [x] Improved parsing and streaming
-- [x] Fix "cannot use 'in' operator to search for "detail" in "404: Model not f..." (updated default model id)
-- [x] System message pass-through and override valves
-- [x] Emit interval
+- [x] Advanced parsing logic
+- [x] Fixed output buffering
 
 """
 
@@ -1206,9 +1204,7 @@ class Pipe:
 
                 if tag_index != -1:
                     content_before_tag = buffer_combined[:tag_index]
-                    await self.emit_output(
-                        __event_emitter__, content_before_tag.strip()
-                    )
+                    await self.emit_output(__event_emitter__, content_before_tag)
                     self.log_debug(
                         f"[OUTPUT_PARSING] Emitting content up to </Output>: {content_before_tag}"
                     )
@@ -1223,17 +1219,31 @@ class Pipe:
                     continue
                 elif is_final_chunk:
                     # Emit remaining buffer as final chunk
-                    if buffer_combined.strip():
-                        await self.emit_output(
-                            __event_emitter__, buffer_combined.strip()
-                        )
+                    if buffer_combined:
+                        await self.emit_output(__event_emitter__, buffer_combined)
                         self.log_debug(
-                            f"[OUTPUT_PARSING] Final chunk: Emitting remaining buffer: {buffer_combined.strip()}"
+                            f"[OUTPUT_PARSING] Final chunk: Emitting remaining buffer: {buffer_combined}"
                         )
                     self.buffer = ""
                     self.output_buffer_tokens = []
                     break
                 else:
+                    # **New Condition: Emit first half if buffer is too large and end tag not found**
+                    if (
+                        len(buffer_combined) >= 2 * len(end_tag)
+                        and end_tag not in buffer_combined
+                    ):
+                        half_length = len(buffer_combined) // 2
+                        content_to_emit = buffer_combined[:half_length]
+                        await self.emit_output(__event_emitter__, content_to_emit)
+                        self.log_debug(
+                            f"[OUTPUT_PARSING] Buffer exceeded twice the end tag length. Emitting first half: {content_to_emit}"
+                        )
+                        # Update buffer_combined to keep the second half
+                        self.buffer = buffer_combined[half_length:]
+                        self.output_buffer_tokens = []
+                        continue  # Continue processing with updated buffer
+
                     # Buffer content until </Output> tag is detected
                     if len(buffer_combined) > self.valves.output_buffer_limit:
                         emit_content = buffer_combined[
@@ -1247,7 +1257,7 @@ class Pipe:
                         self.output_buffer_tokens = list(buffer_combined)
 
                     if emit_content:
-                        await self.emit_output(__event_emitter__, emit_content.strip())
+                        await self.emit_output(__event_emitter__, emit_content)
                         self.log_debug(
                             f"[OUTPUT_PARSING] Emitting partial content: {emit_content}"
                         )
@@ -1273,7 +1283,7 @@ class Pipe:
             self.log_debug(
                 f"[FINAL_CHUNK] Emitting remaining buffer as standard output: {self.buffer}"
             )
-            await self.emit_output(__event_emitter__, self.buffer.strip())
+            await self.emit_output(__event_emitter__, self.buffer)
             self.buffer = ""
 
     async def non_stream_response(self, payload, __event_emitter__):
