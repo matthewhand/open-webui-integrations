@@ -506,7 +506,7 @@ class Pipe:
             elif isinstance(response, dict):
                 # Correctly access the nested "content" key
                 try:
-                    content = response["choices"][0]["message"]["content"].rstrip("\n")
+                    content = response["choices"][0]["message"]["content"] # .rstrip("\n")
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {content}"
                     )
@@ -607,7 +607,7 @@ class Pipe:
 
                 # Strip 'data: ' prefix if present
                 if chunk_str.startswith("data: "):
-                    chunk_str = chunk_str[6:].strip()
+                    chunk_str = chunk_str[6:]
 
                 # End the stream if '[DONE]' signal is received
                 if chunk_str == "[DONE]":
@@ -631,7 +631,7 @@ class Pipe:
                     # Append valid content to the collected output with more precise stripping
                     if message_content:
                         # Only remove trailing whitespace to preserve internal spaces
-                        collected_output += message_content.rstrip()  # STRIP_OPERATION: Removes trailing whitespace
+                        collected_output += message_content # .rstrip()  # STRIP_OPERATION: Removes trailing whitespace
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
                     else:
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
@@ -645,7 +645,7 @@ class Pipe:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Collected output: {collected_output}")
-        return collected_output.strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
+        return collected_output # .strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -702,7 +702,7 @@ class Pipe:
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
                     self.consensus_output = (
-                        consensus_response["choices"][0]["message"]["content"].strip()
+                        consensus_response["choices"][0]["message"]["content"] # .strip()
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -728,7 +728,7 @@ class Pipe:
                 response_data = await self.handle_json_response(consensus_response)
                 try:
                     self.consensus_output = (
-                        response_data["choices"][0]["message"]["content"].strip()
+                        response_data["choices"][0]["message"]["content"] # .strip()
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -916,13 +916,13 @@ class Pipe:
                 raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
 
             # Clean the main content by removing only newline characters
-            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
-            self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
+            # content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
+            # self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
 
             # Prepare the message event
             main_message_event = {
                 "type": "message",
-                "data": {"content": content_cleaned},
+                "data": {"content": content},
             }
 
             try:
@@ -1164,7 +1164,7 @@ class Pipe:
                                 f"[PIPE] Model {model_id} error: {result['error']}"
                             )
                             self.interrupted_contributors.add(model_id)
-                        elif output.strip():
+                        elif output: #.strip():
                             self.model_outputs[model_id] = output
                             self.completed_contributors.add(model_id)
                             self.log_debug(
