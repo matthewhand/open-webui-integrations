@@ -539,6 +539,21 @@ class Pipe:
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] JSON decoding error for model {model_id}: {parse_error}"
                     )
+                    self.log_debug(
+                        f"[QUERY_CONTRIBUTOR] Raw collected output: {collected_output}"
+                    )
+                    # Attempt to dump available keys if possible
+                    try:
+                        temp_data = json.loads(collected_output)
+                        if isinstance(temp_data, dict):
+                            keys = temp_data.keys()
+                            self.log_debug(
+                                f"[QUERY_CONTRIBUTOR] Available keys in JSON: {list(keys)}"
+                            )
+                    except:
+                        self.log_debug(
+                            "[QUERY_CONTRIBUTOR] Unable to parse JSON to dump keys."
+                        )
                     return {
                         "model": model_id,
                         "error": f"JSON Decode Error: {parse_error}",
@@ -546,6 +561,9 @@ class Pipe:
                 except KeyError as key_error:
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] Key error while parsing response from {model_id}: {key_error}"
+                    )
+                    self.log_debug(
+                        f"[QUERY_CONTRIBUTOR] Raw collected output: {collected_output}"
                     )
                     return {"model": model_id, "error": f"Key Error: {key_error}"}
             else:
@@ -666,10 +684,6 @@ class Pipe:
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
         Generate a consensus response using the outputs from all completed contributing models.
-
-        Args:
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): Event emitter for sending messages.
-            consensus_model_id (str): The ID of the consensus model to use.
         """
         self.log_debug(
             f"[GENERATE_CONSENSUS] Called with emitter: {__event_emitter__} and model ID: {consensus_model_id}"
@@ -741,6 +755,11 @@ class Pipe:
             await self.emit_output(
                 __event_emitter__, self.consensus_output, include_collapsible=True
             )
+
+            # Emit collapsible if tags were detected
+            if self.tags_detected:
+                await self.emit_collapsible(__event_emitter__)
+
         except json.JSONDecodeError as e:
             self.log_debug(f"[GENERATE_CONSENSUS] JSON decoding error: {e}")
             await self.emit_status(
