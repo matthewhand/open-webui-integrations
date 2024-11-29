@@ -483,8 +483,19 @@ class Pipe:
         return model_categories
 
     async def query_contributing_model(
-        self, model_id: str, payload: dict
+        self, model_id: str, payload: dict, __event_emitter__: Callable[[dict], Awaitable[None]]
     ) -> Dict[str, str]:
+        """
+        Query a single contributing model and emit its collapsible output as soon as it's received.
+
+        Args:
+            model_id (str): The ID of the contributing model.
+            payload (dict): The payload to send to the contributing model.
+            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+
+        Returns:
+            Dict[str, str]: The output of the contributing model or an error.
+        """
         self.log_debug(
             f"[QUERY_CONTRIBUTOR] Querying contributing model: {model_id} with payload: {payload}"
         )
@@ -501,27 +512,43 @@ class Pipe:
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Collected output from {model_id}: {collected_output}"
                 )
-                return {"model": model_id, "output": collected_output}
-
             elif isinstance(response, dict):
                 # Correctly access the nested "content" key
                 try:
-                    content = response["choices"][0]["message"]["content"] # .rstrip("\n")
-                    self.log_debug(
-                        f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {content}"
+                    collected_output = response["choices"][0]["message"]["content"].rstrip(
+                        "\n"
                     )
-                    return {"model": model_id, "output": content}
+                    self.log_debug(
+                        f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {collected_output}"
+                    )
                 except (KeyError, IndexError) as e:
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] Missing 'content' key in response from {model_id}: {e}"
                     )
                     return {"model": model_id, "error": "Missing 'content' key in response."}
-
             else:
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Unexpected response type: {type(response)}"
                 )
                 return {"model": model_id, "error": "Unexpected response type."}
+
+            # Emit collapsible for this contributing model
+            collapsible_content = f"""
+<details>
+<summary>Model {model_id} Output</summary>
+<pre>{self.escape_html(collected_output.strip())}</pre>
+</details>
+""".strip()
+
+            await __event_emitter__(
+                {
+                    "type": "message",
+                    "data": {"content": collapsible_content},
+                }
+            )
+            self.log_debug(f"[QUERY_CONTRIBUTOR] Emitted collapsible for model {model_id}.")
+
+            return {"model": model_id, "output": collected_output}
 
         except Exception as e:
             self.log_debug(
@@ -607,7 +634,7 @@ class Pipe:
 
                 # Strip 'data: ' prefix if present
                 if chunk_str.startswith("data: "):
-                    chunk_str = chunk_str[6:]
+                    chunk_str = chunk_str[6:].strip()
 
                 # End the stream if '[DONE]' signal is received
                 if chunk_str == "[DONE]":
@@ -631,7 +658,7 @@ class Pipe:
                     # Append valid content to the collected output with more precise stripping
                     if message_content:
                         # Only remove trailing whitespace to preserve internal spaces
-                        collected_output += message_content # .rstrip()  # STRIP_OPERATION: Removes trailing whitespace
+                        collected_output += message_content.rstrip()  # STRIP_OPERATION: Removes trailing whitespace
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
                     else:
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
@@ -645,7 +672,7 @@ class Pipe:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Collected output: {collected_output}")
-        return collected_output # .strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
+        return collected_output.strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -702,7 +729,7 @@ class Pipe:
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
                     self.consensus_output = (
-                        consensus_response["choices"][0]["message"]["content"] # .strip()
+                        consensus_response["choices"][0]["message"]["content"].strip()
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -728,7 +755,7 @@ class Pipe:
                 response_data = await self.handle_json_response(consensus_response)
                 try:
                     self.consensus_output = (
-                        response_data["choices"][0]["message"]["content"] # .strip()
+                        response_data["choices"][0]["message"]["content"].strip()
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -873,9 +900,9 @@ class Pipe:
             f"""
 <details>
 <summary>Model {model_id} Output</summary>
-{self.escape_html(output)}
+<pre>{self.escape_html(output.strip())}</pre>
 </details>
-"""
+""".strip()
             for model_id, output in self.model_outputs.items()
         )
 
@@ -916,13 +943,13 @@ class Pipe:
                 raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
 
             # Clean the main content by removing only newline characters
-            # content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
-            # self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
+            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
+            self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
 
             # Prepare the message event
             main_message_event = {
                 "type": "message",
-                "data": {"content": content},
+                "data": {"content": content_cleaned},
             }
 
             try:
@@ -1040,7 +1067,7 @@ class Pipe:
         6. Emit initial status: "Seeking Consensus".
         7. Query the selected contributing models while managing retries for random mode.
         8. Emit contribution completion status.
-        9. Emit collapsible sections with model outputs.
+        9. Emit collapsible sections with model outputs as they are received.
         10. Generate consensus using the selected consensus model after all contributing models complete.
         11. Emit consensus completion status.
         12. Return the consensus output or an error message in a standardized format.
@@ -1125,7 +1152,7 @@ class Pipe:
                 query_tasks = [
                     asyncio.create_task(
                         self.query_contributing_model(
-                            model["id"], payloads[model["id"]]
+                            model["id"], payloads[model["id"]], __event_emitter__
                         )
                     )
                     for model in remaining_models
@@ -1164,7 +1191,7 @@ class Pipe:
                                 f"[PIPE] Model {model_id} error: {result['error']}"
                             )
                             self.interrupted_contributors.add(model_id)
-                        elif output: #.strip():
+                        elif output.strip():
                             self.model_outputs[model_id] = output
                             self.completed_contributors.add(model_id)
                             self.log_debug(
@@ -1190,12 +1217,7 @@ class Pipe:
                 f"[PIPE] Emitted contribution completion status: Contribution took {contribution_time_str}"
             )
 
-            # Step 8: Emit Collapsible Sections with Model Outputs
-            if self.valves.use_collapsible:
-                await self.emit_collapsible(__event_emitter__)
-                self.log_debug("[PIPE] Emitted collapsible sections.")
-
-            # Step 9: Generate Consensus
+            # Step 8: Generate Consensus
             consensus_model_id = (
                 self.valves.consensus_model_id
                 if self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER
@@ -1207,7 +1229,7 @@ class Pipe:
             self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
             await self.generate_consensus(__event_emitter__, consensus_model_id)
 
-            # Step 10: Emit Consensus Completion Status
+            # Step 9: Emit Consensus Completion Status
             consensus_time = time.time() - self.start_time
             consensus_time_str = self.format_elapsed_time(consensus_time)
             await self.emit_status(
@@ -1220,7 +1242,7 @@ class Pipe:
                 f"[PIPE] Emitted consensus completion status: Consensus took {consensus_time_str}"
             )
 
-            # Step 11: Emit Final Consensus Output as a Message
+            # Step 10: Emit Final Consensus Output as a Message
             if self.consensus_output:
                 await self.emit_output(__event_emitter__, self.consensus_output)
                 self.log_debug("[PIPE] Final consensus output emitted as a message.")
