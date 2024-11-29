@@ -1,6 +1,6 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.8
+version: 0.4.8b
 
 - [x] Updated to work on OWUI 0.4.x
 - [x] OpenAI streaming
@@ -716,6 +716,12 @@ class Pipe:
             )
 
             if summary:
+                # Ensure we are in thought_parsing mode
+                if self.mode != "thought_parsing":
+                    self.log_debug(
+                        f"[TRIGGER_SUMMARY] Not in thought_parsing mode (current mode: {self.mode}). Skipping summary generation."
+                    )
+                    return
                 # Emit the summary as a status update
                 await self.emit_status(__event_emitter__, "Info", summary, False)
                 # Reset token count and tracked tokens after summary
@@ -739,9 +745,6 @@ class Pipe:
         finally:
             # Reset the flag
             self.summary_in_progress = False
-            # # Add an additional brief delay (workaround for final Thought status)
-            # self.log_debug("[TRIGGER_SUMMARY] Adding 1-second delay.")
-            # await asyncio.sleep(1)
 
     async def generate_summary(self) -> Optional[str]:
         """
