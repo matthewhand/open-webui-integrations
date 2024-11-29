@@ -504,11 +504,18 @@ class Pipe:
                 return {"model": model_id, "output": collected_output}
 
             elif isinstance(response, dict):
-                output = response.get("choices", [{}])[0].get("message", {}).get("content", "").rstrip("\n")  # STRIP_OPERATION: Removes trailing newline
-                self.log_debug(
-                    f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {output}"
-                )
-                return {"model": model_id, "output": output}
+                # Correctly access the nested "content" key
+                try:
+                    content = response["choices"][0]["message"]["content"].rstrip("\n")
+                    self.log_debug(
+                        f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {content}"
+                    )
+                    return {"model": model_id, "output": content}
+                except (KeyError, IndexError) as e:
+                    self.log_debug(
+                        f"[QUERY_CONTRIBUTOR] Missing 'content' key in response from {model_id}: {e}"
+                    )
+                    return {"model": model_id, "error": "Missing 'content' key in response."}
 
             else:
                 self.log_debug(
@@ -700,7 +707,7 @@ class Pipe:
                     await self.emit_output(
                         __event_emitter__,
                         self.consensus_output,  # Removed the "Consensus response: " prefix
-                        include_collapsible=True,
+                        include_collapsible=False,  # Do not emit collapsibles here
                     )
                     await self.emit_status(__event_emitter__, "Completed", done=True)
                 except (KeyError, IndexError) as e:
@@ -726,7 +733,7 @@ class Pipe:
                     await self.emit_output(
                         __event_emitter__,
                         self.consensus_output,  # Removed the "Consensus response: " prefix
-                        include_collapsible=True,
+                        include_collapsible=False,  # Do not emit collapsibles here
                     )
                     await self.emit_status(__event_emitter__, "Completed", done=True)
                 except (KeyError, IndexError) as e:
@@ -749,7 +756,7 @@ class Pipe:
                 await self.emit_output(
                     __event_emitter__,
                     self.consensus_output,  # Removed the "Consensus response: " prefix
-                    include_collapsible=True,
+                    include_collapsible=False,  # Do not emit collapsibles here
                 )
                 await self.emit_status(__event_emitter__, "Completed", done=True)
 
@@ -866,9 +873,9 @@ class Pipe:
             f"""
 <details>
 <summary>Model {model_id} Output</summary>
-<pre>{self.escape_html(output.strip())}</pre>
+{self.escape_html(output)}
 </details>
-""".strip()
+"""
             for model_id, output in self.model_outputs.items()
         )
 
@@ -1033,9 +1040,10 @@ class Pipe:
         6. Emit initial status: "Seeking Consensus".
         7. Query the selected contributing models while managing retries for random mode.
         8. Emit contribution completion status.
-        9. Generate consensus using the selected consensus model after all contributing models complete.
-        10. Emit consensus completion status.
-        11. Return the consensus output or an error message in a standardized format.
+        9. Emit collapsible sections with model outputs.
+        10. Generate consensus using the selected consensus model after all contributing models complete.
+        11. Emit consensus completion status.
+        12. Return the consensus output or an error message in a standardized format.
 
         Args:
             body (dict): The incoming request payload.
@@ -1182,7 +1190,12 @@ class Pipe:
                 f"[PIPE] Emitted contribution completion status: Contribution took {contribution_time_str}"
             )
 
-            # Step 8: Generate Consensus
+            # Step 8: Emit Collapsible Sections with Model Outputs
+            if self.valves.use_collapsible:
+                await self.emit_collapsible(__event_emitter__)
+                self.log_debug("[PIPE] Emitted collapsible sections.")
+
+            # Step 9: Generate Consensus
             consensus_model_id = (
                 self.valves.consensus_model_id
                 if self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER
@@ -1194,7 +1207,7 @@ class Pipe:
             self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
             await self.generate_consensus(__event_emitter__, consensus_model_id)
 
-            # Step 9: Emit Consensus Completion Status
+            # Step 10: Emit Consensus Completion Status
             consensus_time = time.time() - self.start_time
             consensus_time_str = self.format_elapsed_time(consensus_time)
             await self.emit_status(
@@ -1207,7 +1220,7 @@ class Pipe:
                 f"[PIPE] Emitted consensus completion status: Consensus took {consensus_time_str}"
             )
 
-            # Step 10: Emit Final Consensus Output as a Message
+            # Step 11: Emit Final Consensus Output as a Message
             if self.consensus_output:
                 await self.emit_output(__event_emitter__, self.consensus_output)
                 self.log_debug("[PIPE] Final consensus output emitted as a message.")
