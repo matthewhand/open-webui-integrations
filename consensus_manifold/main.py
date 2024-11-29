@@ -11,19 +11,30 @@ from open_webui.utils.misc import pop_system_message
 from starlette.responses import StreamingResponse, JSONResponse
 from open_webui.main import (
     generate_chat_completions,
-    generate_moa_response,
+    generate_moa_response,  # Ensure this is correctly imported
 )
 
 import logging
 import re  # For regex operations
+from dataclasses import dataclass  # For defining the User class
 
+# Define the User class with required attributes
+@dataclass
+class User:
+    id: str
+    username: str
+    name: str  # Added the 'name' attribute
+    role: str
+    email: str  # Ensures 'email' attribute is present
 
-# Mock the user object as expected by the function (OWUI 0.5.x constraint)
-mock_user = {
-    "id": "consensus_manifold",
-    "username": "consensus_manifold",
-    "role": "admin",
-}
+# Instantiate the mock_user with all necessary attributes, including 'name'
+mock_user = User(
+    id="consensus_manifold",
+    username="consensus_manifold",
+    name="Consensus Manifold",
+    role="admin",
+    email="root@host.docker.internal",
+)
 
 # Global Placeholders
 CONSENSUS_PLACEHOLDER = "your-consensus-model-id-goes-here"
@@ -33,7 +44,6 @@ CONSENSUS_SYSTEM_PROMPT_DEFAULT = (
     "You are finding consensus among the output of multiple models."
 )
 PROGRESS_SUMMARY_STATUS_PROMPT_DEFAULT = "Summarize progress in exactly 4 words."
-
 
 class Pipe:
     """
@@ -127,7 +137,7 @@ class Pipe:
         )
         strip_collapsible_tags: bool = Field(
             default=False,
-            description="Enable or disable stripping of <details> HTML tags from assistant messages.",
+            description="Enable or disable stripping of <details> HTML tags from assistant messages.",  # ADJUSTED: Controls stripping behavior
         )
         append_system_prompt: bool = Field(
             default=False,
@@ -267,7 +277,7 @@ class Pipe:
         # Extract and strip the meta-model ID using the manifold prefix
         model_id = body.get("model", "")
         if self.valves.manifold_prefix in model_id:
-            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # Strip prefix
+            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # STRIP_OPERATION: Strips prefix
             self.log_debug(f"Stripped meta-model ID: {meta_model}")
         else:
             meta_model = model_id
@@ -411,7 +421,7 @@ class Pipe:
                         "content": (
                             self.clean_message_content(message.get("content", ""))
                             if self.valves.strip_collapsible_tags
-                            and message["role"] == "assistant"
+                            and message["role"] == "assistant"  # STRIP_OPERATION: Conditional stripping
                             else message.get("content", "")
                         ),
                     }
@@ -494,7 +504,7 @@ class Pipe:
                 return {"model": model_id, "output": collected_output}
 
             elif isinstance(response, dict):
-                output = response.get("choices", [{}])[0].get("message", {}).get("content", "").rstrip("\n")
+                output = response.get("choices", [{}])[0].get("message", {}).get("content", "").rstrip("\n")  # STRIP_OPERATION: Removes trailing newline
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {output}"
                 )
@@ -611,9 +621,10 @@ class Pipe:
                     elif "message" in choice and "content" in choice["message"]:
                         message_content = choice["message"]["content"]
 
-                    # Append valid content to the collected output
+                    # Append valid content to the collected output with more precise stripping
                     if message_content:
-                        collected_output += message_content.strip()
+                        # Only remove trailing whitespace to preserve internal spaces
+                        collected_output += message_content.rstrip()  # STRIP_OPERATION: Removes trailing whitespace
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
                     else:
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
@@ -627,7 +638,7 @@ class Pipe:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Collected output: {collected_output}")
-        return collected_output.strip()
+        return collected_output.strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -669,34 +680,66 @@ class Pipe:
             self.log_debug(f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}")
 
             # Call the consensus generation function directly
-            consensus_response = await generate_moa_response(form_data=payload, user=mock_user)
+            consensus_response = await generate_moa_response(
+                form_data=payload, user=mock_user
+            )
 
             # Log the type of consensus_response
-            self.log_debug(f"[GENERATE_CONSENSUS] Type of consensus_response: {type(consensus_response)}")
+            self.log_debug(
+                f"[GENERATE_CONSENSUS] Type of consensus_response: {type(consensus_response)}"
+            )
 
             # Handle based on response type
             if isinstance(consensus_response, dict):
                 # Handle direct dict response
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
-                self.consensus_output = consensus_response.get("consensus", "").strip()
-                await self.emit_output(
-                    __event_emitter__,
-                    f"Consensus response: {self.consensus_output}",
-                    include_collapsible=True,
-                )
-                await self.emit_status(__event_emitter__, "Completed", done=True)
+                try:
+                    self.consensus_output = (
+                        consensus_response["choices"][0]["message"]["content"].strip()
+                    )
+                    await self.emit_output(
+                        __event_emitter__,
+                        self.consensus_output,  # Removed the "Consensus response: " prefix
+                        include_collapsible=True,
+                    )
+                    await self.emit_status(__event_emitter__, "Completed", done=True)
+                except (KeyError, IndexError) as e:
+                    error_detail = consensus_response.get("detail", str(e))
+                    self.log_debug(
+                        f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}"
+                    )
+                    await self.emit_status(
+                        __event_emitter__,
+                        "Error",
+                        f"Consensus generation failed: {error_detail}",
+                        done=True,
+                    )
 
             elif isinstance(consensus_response, JSONResponse):
                 # Handle JSONResponse
                 self.log_debug(f"[GENERATE_CONSENSUS] Handling JSONResponse")
                 response_data = await self.handle_json_response(consensus_response)
-                self.consensus_output = response_data.get("consensus", "").strip()
-                await self.emit_output(
-                    __event_emitter__,
-                    f"Consensus response: {self.consensus_output}",
-                    include_collapsible=True,
-                )
-                await self.emit_status(__event_emitter__, "Completed", done=True)
+                try:
+                    self.consensus_output = (
+                        response_data["choices"][0]["message"]["content"].strip()
+                    )
+                    await self.emit_output(
+                        __event_emitter__,
+                        self.consensus_output,  # Removed the "Consensus response: " prefix
+                        include_collapsible=True,
+                    )
+                    await self.emit_status(__event_emitter__, "Completed", done=True)
+                except (KeyError, IndexError) as e:
+                    error_detail = response_data.get("detail", str(e))
+                    self.log_debug(
+                        f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}"
+                    )
+                    await self.emit_status(
+                        __event_emitter__,
+                        "Error",
+                        f"Consensus generation failed: {error_detail}",
+                        done=True,
+                    )
 
             elif isinstance(consensus_response, StreamingResponse):
                 # Handle StreamingResponse
@@ -705,7 +748,7 @@ class Pipe:
                 self.consensus_output = collected_output
                 await self.emit_output(
                     __event_emitter__,
-                    f"Consensus response: {self.consensus_output}",
+                    self.consensus_output,  # Removed the "Consensus response: " prefix
                     include_collapsible=True,
                 )
                 await self.emit_status(__event_emitter__, "Completed", done=True)
@@ -865,8 +908,8 @@ class Pipe:
                 self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
                 raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
 
-            # Clean the main content
-            content_cleaned = content.strip("\n")
+            # Clean the main content by removing only newline characters
+            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
             self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
 
             # Prepare the message event
@@ -912,9 +955,9 @@ class Pipe:
         Returns:
             str: Cleaned message content.
         """
-        # This ensures that existing collapsible tags are not nested or interfere with new ones
+        # STRIP_OPERATION: Removes <details> tags and their contents using regex
         details_pattern = r"<details>\s*<summary>.*?</summary>\s*.*?</details>"
-        return re.sub(details_pattern, "", content, flags=re.DOTALL)
+        return re.sub(details_pattern, "", content, flags=re.DOTALL | re.IGNORECASE)  # ADJUSTED: Added re.IGNORECASE
 
     def format_elapsed_time(self, elapsed: float) -> str:
         """
@@ -1041,7 +1084,7 @@ class Pipe:
                     "content": (
                         self.clean_message_content(message.get("content", ""))
                         if self.valves.strip_collapsible_tags
-                        and message["role"] == "assistant"
+                        and message["role"] == "assistant"  # STRIP_OPERATION: Conditional stripping
                         else message.get("content", "")
                     ),
                 }
