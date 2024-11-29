@@ -1,6 +1,6 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.7
+version: 0.4.8
 
 - [x] Updated to work on OWUI 0.4.x
 - [x] OpenAI streaming
@@ -8,7 +8,8 @@ version: 0.4.7
 - [x] Thought expansion
 - [x] LLM summary generation
 - [x] Advanced parsing logic
-- [x] Fixed output buffering
+- [x] Optimised emission timing
+- [x] Valve to append system prompt to ever request
 
 """
 
@@ -124,6 +125,13 @@ class Pipe:
             default=SYSTEM_MESSAGE_DEFAULT,
             description=(
                 "The system message to use if system_message_override_enabled is True."
+            ),
+        )
+
+        append_system_prompt: bool = Field(
+            default=False,
+            description=(
+                "If True, appends the system message to every user request, enclosed in parentheses."
             ),
         )
 
@@ -330,39 +338,6 @@ class Pipe:
             Union[str, StreamingResponse]: The response to be sent back.
         """
         # Reset state variables for each new request
-        self.thought_buffer = ""
-        self.output_buffer = ""
-        self.word_count_since_last_summary = 0
-        self.tracked_tokens = []
-        self.last_summary_time = time.time()
-        self.start_time = time.time()
-        self.stop_emitter.clear()
-        self.thought_summary_task = None
-        self.buffer = ""  # Reset buffer
-        self.task_model_id = None  # Reset task model ID
-        self.messages = []  # Reset messages list
-        self.determined = False
-        self.inside_thought = False
-        self.inside_output = False
-        self.tags_detected = False  # Initialize tags_detected
-        self.summary_in_progress = False  # Flag to indicate summary generation
-        self.llm_tasks = []  # List to track LLM tasks
-        self.final_status_emitted = False  # Flag to indicate if final status is emitted
-
-        # Reset current tags
-        self.current_thought_tag = (
-            self.valves.thought_tag
-        )  # Default to valve's thought_tag
-        self.current_output_tag = (
-            self.valves.output_tag
-        )  # Default to valve's output_tag
-
-        # Reset operational mode
-        self.mode = "buffer_parsing"
-
-        # Reset output buffer tokens
-        self.output_buffer_tokens = []
-
         self.reset_state()
 
         try:
@@ -387,9 +362,25 @@ class Pipe:
                 self.task_model_id = model_id  # Fallback to original model_id
 
             self.log_debug(f"Selected task_model_id: {self.task_model_id}")
+
             # Handle system messages if present (assumes system messages are separated)
             body_messages = body.get("messages", [])
             system_message, messages = pop_system_message(body_messages)
+
+            # Append system prompt to user messages if the valve is enabled
+            if self.valves.append_system_prompt:
+                system_prompt = (
+                    self.valves.system_message_override
+                    if self.valves.system_message_override_enabled
+                    else get_content_from_message(system_message)
+                )
+                for message in messages:
+                    if message["role"] == "user":
+                        original_content = message.get("content", "")
+                        message["content"] = f"{original_content} ({system_prompt})"
+                        self.log_debug(
+                            f"[APPEND_SYSTEM_PROMPT] Modified user message: {message['content']}"
+                        )
 
             # Handle system message override or pass-through
             if self.valves.system_message_override_enabled:
