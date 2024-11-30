@@ -20,7 +20,6 @@ from open_webui.main import (
 )
 import aiohttp  # Added to handle ClientResponseError
 
-
 # Define the User class with required attributes
 @dataclass
 class User:
@@ -29,7 +28,6 @@ class User:
     name: str  # Added the 'name' attribute
     role: str
     email: str  # Ensures 'email' attribute is present
-
 
 # Instantiate the mock_user with all necessary attributes, including 'name'
 mock_user = User(
@@ -48,7 +46,6 @@ CONSENSUS_SYSTEM_PROMPT_DEFAULT = (
     "Only report on the consensus across the output provided from multiple models."
 )
 PROGRESS_SUMMARY_STATUS_PROMPT_DEFAULT = "Summarize progress in exactly 4 words."
-
 
 class Pipe:
     """
@@ -274,8 +271,10 @@ class Pipe:
         elif meta_model_id.startswith("explicit"):
             return "explicit"
         elif meta_model_id.startswith("tag-"):
-            # Strip the "tag-" prefix
-            self.valves.contributor_tags = meta_model_id[4:]  # Update tags to match the prefix
+            # Strip the "tag-" prefix and update contributor_tags
+            stripped_tags = meta_model_id[4:]  # Removes 'tag-' prefix
+            self.valves.contributor_tags = stripped_tags  # Update tags to match the prefix
+            self.log_debug(f"[DETERMINE_MODE] Updated contributor_tags to: {stripped_tags}")
             return "tags"
         else:
             return "unsupported"
@@ -359,7 +358,7 @@ class Pipe:
                     "[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models."
                 )
             try:
-                selected_model_ids = await self.fetch_available_contributing_models(tags=tags)
+                selected_model_ids = await self.fetch_available_contributing_models()
                 self.log_debug(f"[DETERMINE_CONTRIBUTORS] Selected model IDs based on tags: {selected_model_ids}")
 
                 # Create a list of model dictionaries with 'id' and 'name'
@@ -409,30 +408,41 @@ class Pipe:
             else:
                 raise ValueError("[FETCH_CONTRIBUTORS] Invalid response structure from get_models.")
 
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available_models: {available_models}")
+            self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available_models: {[model['id'] for model in available_models]}")
 
             # Parse tags only if the current mode is "tags"
             if self.current_mode == "tags":
                 tags = self.parse_tags(self.valves.contributor_tags)
                 self.log_debug(f"[FETCH_CONTRIBUTORS] Filtering models using tags: {tags}")
 
-                # Filter models by tags
-                required_tags = set(tags)
-                available_models = [
-                    model for model in available_models
-                    if required_tags.intersection(
-                        {tag.get("name", "") for tag in model.get("meta", {}).get("tags", [])}
-                    )
-                ]
+                if tags:
+                    # Convert tags to lowercase for case-insensitive matching
+                    required_tags = set(tag.lower() for tag in tags)
+                    # Filter models by tags (case-insensitive)
+                    available_models = [
+                        model for model in available_models
+                        if required_tags.intersection(
+                            {tag.get("name", "").lower() for tag in model.get("info", {}).get("meta", {}).get("tags", [])}
+                        )
+                    ]
 
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}")
+                    self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}")
+                else:
+                    self.log_debug("[FETCH_CONTRIBUTORS] No valid tags provided for filtering.")
 
             # Apply blacklist regex to exclude certain models
             blacklist_pattern = self.valves.random_contributing_models_blacklist_regex
-            blacklist_regex = re.compile(blacklist_pattern, re.IGNORECASE)
+            try:
+                blacklist_regex = re.compile(blacklist_pattern, re.IGNORECASE)
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Compiled blacklist regex: {blacklist_pattern}")
+            except re.error as e:
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
+                raise ValueError(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
+
+            # Normalize and filter out models that match the blacklist regex
             available_models = [
                 model for model in available_models
-                if not blacklist_regex.search(model.get("id", "").lower())
+                if not blacklist_regex.search(model.get("id", "").lower())  # Normalize ID to lowercase
             ]
 
             self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in available_models]}")
@@ -441,7 +451,12 @@ class Pipe:
                 raise ValueError("[FETCH_CONTRIBUTORS] No models available after filtering.")
 
             # Select models based on other logic (e.g., random selection)
-            selected_model_ids = [model["id"] for model in available_models]
+            # Here, we'll select up to `random_contributing_models_number` models randomly
+            num_models_to_select = min(
+                self.valves.random_contributing_models_number,
+                len(available_models)
+            )
+            selected_model_ids = random.sample([model["id"] for model in available_models], num_models_to_select)
             self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}")
 
             return selected_model_ids
