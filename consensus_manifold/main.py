@@ -749,6 +749,20 @@ class Pipe:
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output}")
         return collected_output # do not .strip()
 
+    def ensure_newlines(self, content: str) -> str:
+        """
+        Ensure that the content retains proper newlines for readability.
+
+        Args:
+            content (str): The input content.
+
+        Returns:
+            str: The content with newlines properly formatted.
+        """
+        # Replace multiple spaces with a single space and ensure proper line breaks
+        return "\n".join(line.strip() for line in content.splitlines() if line.strip())
+
+
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
         Generate consensus using the designated consensus model.
@@ -774,6 +788,12 @@ class Pipe:
             )
             return
 
+        # Get the user's original query
+        original_query = next(
+            (message["content"] for message in self.messages if message["role"] == "user"),
+            "No user query provided."
+        )
+
         # Prepare a clear delineation of outputs
         delineated_outputs = "\n\n".join(
             f"Model {model_id}:\n{output}"
@@ -791,7 +811,7 @@ class Pipe:
                 },
                 {
                     "role": "user",
-                    "content": delineated_outputs,
+                    "content": f"Original query: {original_query}\n\nModel Outputs:\n{delineated_outputs}",
                 },
             ],
             "stream": True,  # Enable streaming for consensus
@@ -810,6 +830,7 @@ class Pipe:
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
                     self.consensus_output = consensus_response["choices"][0]["message"]["content"]
+                    self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
                     await self.emit_output(
                         __event_emitter__,
                         self.consensus_output,
@@ -830,6 +851,7 @@ class Pipe:
                 self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
                 self.consensus_streamed = True  # Set the flag to indicate streaming
                 self.consensus_output = await self.handle_streaming_response(consensus_response)
+                self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
                 await self.emit_output(
                     __event_emitter__,
                     self.consensus_output,
@@ -855,6 +877,7 @@ class Pipe:
                 f"Consensus generation failed: {str(e)}",
                 done=True,
             )
+
 
     async def emit_status(
         self,
