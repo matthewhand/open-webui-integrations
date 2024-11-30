@@ -71,7 +71,7 @@ class Pipe:
             description="How many models should be selected for contribution.",
         )
         random_contributing_models_blacklist_regex: str = Field(
-            default="(embed|vision|whisper)",
+            default="(embed|vision|whisper|pipe|manifold)",
             description="Regular expression to exclude models from random selection.",
         )
         enable_explicit_contributors: bool = Field(
@@ -606,7 +606,7 @@ class Pipe:
 <summary>Model {model_id} Output</summary>
 {self.escape_html(collected_output)}
 </details>
-""".strip()
+""" # .strip()
 
             self.log_debug(f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id}.")
 
@@ -746,8 +746,8 @@ class Pipe:
             except Exception as e:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
-        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output.strip()}")
-        return collected_output.strip()
+        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output}")
+        return collected_output # do not .strip()
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
