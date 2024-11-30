@@ -486,7 +486,7 @@ class Pipe:
         self, model_id: str, payload: dict, __event_emitter__: Callable[[dict], Awaitable[None]]
     ) -> Dict[str, str]:
         """
-        Query a single contributing model and emit its collapsible output as soon as it's received.
+        Query a contributing model and emit its collapsible output immediately upon receiving the response.
 
         Args:
             model_id (str): The ID of the contributing model.
@@ -494,7 +494,7 @@ class Pipe:
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
 
         Returns:
-            Dict[str, str]: The output of the contributing model or an error.
+            Dict[str, str]: The output from the contributing model or an error message.
         """
         self.log_debug(
             f"[QUERY_CONTRIBUTOR] Querying contributing model: {model_id} with payload: {payload}"
@@ -515,9 +515,7 @@ class Pipe:
             elif isinstance(response, dict):
                 # Correctly access the nested "content" key
                 try:
-                    collected_output = response["choices"][0]["message"]["content"].rstrip(
-                        "\n"
-                    )
+                    collected_output = response["choices"][0]["message"]["content"]
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] Received output from {model_id}: {collected_output}"
                     )
@@ -536,9 +534,9 @@ class Pipe:
             collapsible_content = f"""
 <details>
 <summary>Model {model_id} Output</summary>
-<pre>{self.escape_html(collected_output.strip())}</pre>
+{self.escape_html(collected_output)}
 </details>
-""".strip()
+"""
 
             await __event_emitter__(
                 {
@@ -547,7 +545,6 @@ class Pipe:
                 }
             )
             self.log_debug(f"[QUERY_CONTRIBUTOR] Emitted collapsible for model {model_id}.")
-
             return {"model": model_id, "output": collected_output}
 
         except Exception as e:
@@ -634,7 +631,7 @@ class Pipe:
 
                 # Strip 'data: ' prefix if present
                 if chunk_str.startswith("data: "):
-                    chunk_str = chunk_str[6:].strip()
+                    chunk_str = chunk_str[6:] # .strip()
 
                 # End the stream if '[DONE]' signal is received
                 if chunk_str == "[DONE]":
@@ -655,10 +652,9 @@ class Pipe:
                     elif "message" in choice and "content" in choice["message"]:
                         message_content = choice["message"]["content"]
 
-                    # Append valid content to the collected output with more precise stripping
+                    # Append valid content to the collected output without stripping
                     if message_content:
-                        # Only remove trailing whitespace to preserve internal spaces
-                        collected_output += message_content.rstrip()  # STRIP_OPERATION: Removes trailing whitespace
+                        collected_output += message_content
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
                     else:
                         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
@@ -672,7 +668,7 @@ class Pipe:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Collected output: {collected_output}")
-        return collected_output.strip()  # STRIP_OPERATION: Removes leading and trailing whitespace
+        return collected_output  # No stripping
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -707,7 +703,7 @@ class Pipe:
                 {"model": model_id, "content": output}
                 for model_id, output in self.model_outputs.items()
             ],
-            "stream": False,
+            "stream": True,  # Enable streaming for consensus
         }
 
         try:
@@ -729,7 +725,7 @@ class Pipe:
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
                     self.consensus_output = (
-                        consensus_response["choices"][0]["message"]["content"].strip()
+                        consensus_response["choices"][0]["message"]["content"]
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -755,7 +751,7 @@ class Pipe:
                 response_data = await self.handle_json_response(consensus_response)
                 try:
                     self.consensus_output = (
-                        response_data["choices"][0]["message"]["content"].strip()
+                        response_data["choices"][0]["message"]["content"]
                     )
                     await self.emit_output(
                         __event_emitter__,
@@ -778,13 +774,67 @@ class Pipe:
             elif isinstance(consensus_response, StreamingResponse):
                 # Handle StreamingResponse
                 self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
-                collected_output = await self.handle_streaming_response(consensus_response)
-                self.consensus_output = collected_output
-                await self.emit_output(
-                    __event_emitter__,
-                    self.consensus_output,  # Removed the "Consensus response: " prefix
-                    include_collapsible=False,  # Do not emit collapsibles here
-                )
+                async for chunk in consensus_response.body_iterator:
+                    try:
+                        # Decode chunk to string if it's bytes
+                        if isinstance(chunk, bytes):
+                            try:
+                                chunk_str = chunk.decode("utf-8")
+                            except UnicodeDecodeError as e:
+                                self.log_debug(f"[GENERATE_CONSENSUS] Chunk decode error: {e}")
+                                continue
+                        elif isinstance(chunk, str):
+                            chunk_str = chunk
+                        else:
+                            self.log_debug(f"[GENERATE_CONSENSUS] Unexpected chunk type: {type(chunk)}")
+                            continue
+
+                        self.log_debug(f"[GENERATE_CONSENSUS] Received chunk: {chunk_str}")
+
+                        # Strip 'data: ' prefix if present
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[6:] # .strip()
+
+                        # End the stream if '[DONE]' signal is received
+                        if chunk_str == "[DONE]":
+                            self.log_debug("[GENERATE_CONSENSUS] Received [DONE] signal. Ending stream.")
+                            break
+
+                        # Skip empty chunks
+                        if not chunk_str:
+                            continue
+
+                        # Parse JSON content
+                        try:
+                            data = json.loads(chunk_str)
+                            choice = data.get("choices", [{}])[0]
+                            message_content = ""
+                            if "delta" in choice and "content" in choice["delta"]:
+                                message_content = choice["delta"]["content"]
+                            elif "message" in choice and "content" in choice["message"]:
+                                message_content = choice["message"]["content"]
+
+                            # Append valid content to the consensus output without stripping
+                            if message_content:
+                                self.consensus_output = (self.consensus_output or "") + message_content
+                                # Emit the received chunk as it arrives
+                                await self.emit_output(
+                                    __event_emitter__,
+                                    message_content,  # Emit the chunk directly
+                                    include_collapsible=False,  # Do not emit collapsibles here
+                                )
+                                self.log_debug(f"[GENERATE_CONSENSUS] Emitted consensus chunk: {message_content}")
+                            else:
+                                self.log_debug(f"[GENERATE_CONSENSUS] No content found in chunk: {chunk_str}")
+
+                        except json.JSONDecodeError as e:
+                            self.log_debug(f"[GENERATE_CONSENSUS] JSON decoding error: {e} for chunk: {chunk_str}")
+                        except Exception as e:
+                            self.log_debug(f"[GENERATE_CONSENSUS] Error processing JSON chunk: {e}")
+
+                    except Exception as e:
+                        self.log_debug(f"[GENERATE_CONSENSUS] Unexpected error: {e}")
+
                 await self.emit_status(__event_emitter__, "Completed", done=True)
 
             else:
@@ -895,12 +945,12 @@ class Pipe:
             self.log_debug("[EMIT_COLLAPSIBLE] No model outputs to emit.")
             return
 
-        # Generate collapsible sections for each model
+        # Generate collapsible sections for each model without <pre> tags
         collapsible_content = "\n".join(
             f"""
 <details>
 <summary>Model {model_id} Output</summary>
-<pre>{self.escape_html(output.strip())}</pre>
+{self.escape_html(output)}
 </details>
 """.strip()
             for model_id, output in self.model_outputs.items()
@@ -943,8 +993,9 @@ class Pipe:
                 raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
 
             # Clean the main content by removing only newline characters
-            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
-            self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
+            # BROKEN!! ... content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
+            # self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
+            content_cleaned = content
 
             # Prepare the message event
             main_message_event = {
@@ -1067,7 +1118,7 @@ class Pipe:
         6. Emit initial status: "Seeking Consensus".
         7. Query the selected contributing models while managing retries for random mode.
         8. Emit contribution completion status.
-        9. Emit collapsible sections with model outputs as they are received.
+        9. Emit each contributing model's collapsible as soon as it's received.
         10. Generate consensus using the selected consensus model after all contributing models complete.
         11. Emit consensus completion status.
         12. Return the consensus output or an error message in a standardized format.
@@ -1187,11 +1238,9 @@ class Pipe:
                     else:
                         output = result.get("output", "")
                         if "error" in result:
-                            self.log_debug(
-                                f"[PIPE] Model {model_id} error: {result['error']}"
-                            )
+                            self.log_debug(f"[PIPE] Model {model_id} error: {result['error']}")
                             self.interrupted_contributors.add(model_id)
-                        elif output.strip():
+                        elif output:
                             self.model_outputs[model_id] = output
                             self.completed_contributors.add(model_id)
                             self.log_debug(
@@ -1242,10 +1291,10 @@ class Pipe:
                 f"[PIPE] Emitted consensus completion status: Consensus took {consensus_time_str}"
             )
 
-            # Step 10: Emit Final Consensus Output as a Message
-            if self.consensus_output:
-                await self.emit_output(__event_emitter__, self.consensus_output)
-                self.log_debug("[PIPE] Final consensus output emitted as a message.")
+            # # Step 10: Emit Final Consensus Output as a Message
+            # if self.consensus_output:
+            #     await self.emit_output(__event_emitter__, self.consensus_output)
+            #     self.log_debug("[PIPE] Final consensus output emitted as a message.")
 
             # Return the consensus output
             if self.consensus_output:
