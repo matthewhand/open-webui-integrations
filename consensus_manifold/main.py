@@ -516,7 +516,7 @@ class Pipe:
         # Register random contributing models if enabled
         if self.valves.enable_random_contributors:
             model_categories.append(
-                {"id": "consensus/random", "name": "Random Contributing Models"}
+                {"id": "consensus/random", "name": "Random"}
             )
             self.log_debug("[PIPES] Registered category: consensus/random")
 
@@ -526,7 +526,7 @@ class Pipe:
             and self.valves.explicit_contributing_models
         ):
             model_categories.append(
-                {"id": "consensus/explicit", "name": "Explicit Contributing Models"}
+                {"id": "consensus/explicit", "name": "Explicit"}
             )
             self.log_debug("[PIPES] Registered category: consensus/explicit")
 
@@ -537,7 +537,7 @@ class Pipe:
                 model_categories.append(
                     {
                         "id": f"consensus/tag-{tag}",
-                        "name": f"Contributing Models for Tag: {tag}",
+                        "name": f"Tag: {tag}",
                     }
                 )
                 self.log_debug(f"[PIPES] Registered category: consensus/tag-{tag}")
@@ -774,13 +774,25 @@ class Pipe:
             )
             return
 
+        # Prepare a clear delineation of outputs
+        delineated_outputs = "\n\n".join(
+            f"Model {model_id}:\n{output}"
+            for model_id, output in self.model_outputs.items()
+        )
+
         # Prepare the payload for the consensus model
         payload = {
             "model": consensus_model_id,
-            "prompt": "Aggregate the following outputs to form a consensus response:",
-            "responses": [
-                {"model": model_id, "content": output}
-                for model_id, output in self.model_outputs.items()
+            "messages": [
+                {
+                    "role": "system",
+                    "content": self.valves.consensus_system_prompt
+                    or CONSENSUS_SYSTEM_PROMPT_DEFAULT,
+                },
+                {
+                    "role": "user",
+                    "content": delineated_outputs,
+                },
             ],
             "stream": True,  # Enable streaming for consensus
         }
@@ -789,60 +801,24 @@ class Pipe:
             self.log_debug(f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}")
 
             # Call the consensus generation function directly
-            consensus_response = await generate_moa_response(
+            consensus_response = await generate_chat_completions(
                 form_data=payload, user=mock_user
-            )
-
-            # Log the type of consensus_response
-            self.log_debug(
-                f"[GENERATE_CONSENSUS] Type of consensus_response: {type(consensus_response)}"
             )
 
             # Handle based on response type
             if isinstance(consensus_response, dict):
-                # Handle direct dict response
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
-                    self.consensus_output = (
-                        consensus_response["choices"][0]["message"]["content"]
-                    )
+                    self.consensus_output = consensus_response["choices"][0]["message"]["content"]
                     await self.emit_output(
                         __event_emitter__,
-                        self.consensus_output,  # Removed the "Consensus response: " prefix
+                        self.consensus_output,
                         include_collapsible=False,  # Do not emit collapsibles here
                     )
                     await self.emit_status(__event_emitter__, "Completed", done=True)
                 except (KeyError, IndexError) as e:
                     error_detail = consensus_response.get("detail", str(e))
-                    self.log_debug(
-                        f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}"
-                    )
-                    await self.emit_status(
-                        __event_emitter__,
-                        "Error",
-                        f"Consensus generation failed: {error_detail}",
-                        done=True,
-                    )
-
-            elif isinstance(consensus_response, JSONResponse):
-                # Handle JSONResponse
-                self.log_debug(f"[GENERATE_CONSENSUS] Handling JSONResponse")
-                response_data = await self.handle_json_response(consensus_response)
-                try:
-                    self.consensus_output = (
-                        response_data["choices"][0]["message"]["content"]
-                    )
-                    await self.emit_output(
-                        __event_emitter__,
-                        self.consensus_output,  # Removed the "Consensus response: " prefix
-                        include_collapsible=False,  # Do not emit collapsibles here
-                    )
-                    await self.emit_status(__event_emitter__, "Completed", done=True)
-                except (KeyError, IndexError) as e:
-                    error_detail = response_data.get("detail", str(e))
-                    self.log_debug(
-                        f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}"
-                    )
+                    self.log_debug(f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}")
                     await self.emit_status(
                         __event_emitter__,
                         "Error",
@@ -851,77 +827,18 @@ class Pipe:
                     )
 
             elif isinstance(consensus_response, StreamingResponse):
-                # Handle StreamingResponse
                 self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
                 self.consensus_streamed = True  # Set the flag to indicate streaming
-                async for chunk in consensus_response.body_iterator:
-                    try:
-                        # Decode chunk to string if it's bytes
-                        if isinstance(chunk, bytes):
-                            try:
-                                chunk_str = chunk.decode("utf-8")
-                            except UnicodeDecodeError as e:
-                                self.log_debug(f"[GENERATE_CONSENSUS] Chunk decode error: {e}")
-                                continue
-                        elif isinstance(chunk, str):
-                            chunk_str = chunk
-                        else:
-                            self.log_debug(f"[GENERATE_CONSENSUS] Unexpected chunk type: {type(chunk)}")
-                            continue
-
-                        self.log_debug(f"[GENERATE_CONSENSUS] Received chunk: {chunk_str}")
-
-                        # Strip 'data: ' prefix if present
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[6:]  # Removed .strip()
-
-                        # End the stream if '[DONE]' signal is received
-                        if chunk_str == "[DONE]":
-                            self.log_debug("[GENERATE_CONSENSUS] Received [DONE] signal. Ending stream.")
-                            break
-
-                        # Skip empty chunks
-                        if not chunk_str:
-                            continue
-
-                        # Parse JSON content
-                        try:
-                            data = json.loads(chunk_str)
-                            choice = data.get("choices", [{}])[0]
-                            message_content = ""
-                            if "delta" in choice and "content" in choice["delta"]:
-                                message_content = choice["delta"]["content"]
-                            elif "message" in choice and "content" in choice["message"]:
-                                message_content = choice["message"]["content"]
-
-                            # Append valid content to the consensus output without stripping
-                            if message_content:
-                                self.consensus_output = (self.consensus_output or "") + message_content
-                                # Emit the received chunk as it arrives
-                                await self.emit_output(
-                                    __event_emitter__,
-                                    message_content,  # Emit the chunk directly
-                                    include_collapsible=False,  # Do not emit collapsibles here
-                                )
-                                self.log_debug(f"[GENERATE_CONSENSUS] Emitted consensus chunk: {message_content}")
-                            else:
-                                self.log_debug(f"[GENERATE_CONSENSUS] No content found in chunk: {chunk_str}")
-
-                        except json.JSONDecodeError as e:
-                            self.log_debug(f"[GENERATE_CONSENSUS] JSON decoding error: {e} for chunk: {chunk_str}")
-                        except Exception as e:
-                            self.log_debug(f"[GENERATE_CONSENSUS] Error processing JSON chunk: {e}")
-
-                    except Exception as e:
-                        self.log_debug(f"[GENERATE_CONSENSUS] Unexpected error: {e}")
-
+                self.consensus_output = await self.handle_streaming_response(consensus_response)
+                await self.emit_output(
+                    __event_emitter__,
+                    self.consensus_output,
+                    include_collapsible=False,  # Do not emit collapsibles here
+                )
                 await self.emit_status(__event_emitter__, "Completed", done=True)
 
             else:
-                # Handle unexpected response types
-                self.log_debug(
-                    f"[GENERATE_CONSENSUS] Unexpected response type: {type(consensus_response)}"
-                )
+                self.log_debug(f"[GENERATE_CONSENSUS] Unexpected response type: {type(consensus_response)}")
                 await self.emit_status(
                     __event_emitter__,
                     "Error",
