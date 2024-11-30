@@ -40,12 +40,12 @@ mock_user = User(
 
 # Global Placeholders
 CONSENSUS_PLACEHOLDER = "your-consensus-model-id-goes-here"
-PROGRESS_SUMMARY_PLACEHOLDER = "your-progress-model-id-goes-here"
+RESPONSE_SUMMARY_PLACEHOLDER = "your-progress-model-id-goes-here"
 TAGS_PLACEHOLDER = "comma-separated-list-of-model-tags-goes-here"
 CONSENSUS_SYSTEM_PROMPT_DEFAULT = (
     "Only report on the consensus across the output provided from multiple models."
 )
-PROGRESS_SUMMARY_STATUS_PROMPT_DEFAULT = "Summarize progress in exactly 4 words."
+RESPONSE_SUMMARY_STATUS_PROMPT_DEFAULT = "Summarize in exactly 5 words or less."
 
 class Pipe:
     """
@@ -88,7 +88,7 @@ class Pipe:
             description="Comma-separated list of tags for contributing model selection.",
         )
         manifold_prefix: str = Field(
-            default="consensus/",
+            default="Consensus/",
             description="Prefix used for consensus models.",
         )
         consensus_model_id: str = Field(
@@ -102,19 +102,19 @@ class Pipe:
         enable_llm_summaries: bool = Field(
             default=True, description="Enable LLM-based progress summaries."
         )
-        progress_summary_model_id: str = Field(
-            default=PROGRESS_SUMMARY_PLACEHOLDER,
+        response_summary_model_id: str = Field(
+            default=RESPONSE_SUMMARY_PLACEHOLDER,
             description="Model ID used for generating progress summaries.",
         )
-        progress_summary_interval_seconds: float = Field(
-            default=5.0,
-            description="Interval in seconds between progress summaries.",
-        )
-        progress_summary_status_prompt: str = Field(
-            default=PROGRESS_SUMMARY_STATUS_PROMPT_DEFAULT,
+        # response_summary_interval_seconds: float = Field(
+        #     default=5.0,
+        #     description="Interval in seconds between progress summaries.",
+        # )
+        response_summary_status_prompt: str = Field(
+            default=RESPONSE_SUMMARY_STATUS_PROMPT_DEFAULT,
             description="Prompt for generating progress summaries.",
         )
-        progress_summary_system_prompt: str = Field(
+        response_summary_system_prompt: str = Field(
             default="You are a helpful assistant summarizing thoughts concisely, only respond with the summary.",
             description="System prompt for dynamic status generation.",
         )
@@ -126,17 +126,17 @@ class Pipe:
             default=3.0,
             description="Interval in seconds between progress status updates.",
         )
-        interrupt: bool = Field(
-            default=False, description="Enable or disable interruption logic."
-        )
-        minimum_number_of_models: int = Field(
-            default=2,
-            description="Minimum number of models required to induce interruption.",
-        )
-        interruption_grace_period: float = Field(
-            default=3.0,
-            description="Grace period (in seconds) to wait for additional models after interruption.",
-        )
+        # interrupt: bool = Field(
+        #     default=False, description="(WIP) Enable or disable interruption logic."
+        # )
+        # minimum_number_of_models: int = Field(
+        #     default=2,
+        #     description="(WIP) Minimum number of models required to induce interruption.",
+        # )
+        # interruption_grace_period: float = Field(
+        #     default=3.0,
+        #     description="(WIP) Grace period (in seconds) to wait for additional models after interruption.",
+        # )
         max_reroll_retries: int = Field(
             default=3,
             description="Maximum number of reroll attempts for random models.",
@@ -149,17 +149,17 @@ class Pipe:
             default=False,
             description="Enable or disable stripping of <details> HTML tags from assistant messages.",  # ADJUSTED: Controls stripping behavior
         )
-        append_system_prompt: bool = Field(
-            default=False,
-            description=(
-                "If True, appends the system message to every user request, enclosed in parentheses."
-            ),
-        )
+        # append_system_prompt: bool = Field(
+        #     default=False,
+        #     description=(
+        #         "If True, appends the system message to every user request, enclosed in parentheses."
+        #     ),
+        # )
         debug_valve: bool = Field(default=True, description="Enable debug logging.")
-        max_models_per_provider: int = Field(
-            default=1,
-            description="Maximum number of models to select per provider to avoid rate limiting."
-        )
+        # max_models_per_provider: int = Field(
+        #     default=1,
+        #     description="Maximum number of models to select per provider to avoid rate limiting."
+        # )
 
     def __init__(self):
         """
@@ -173,6 +173,7 @@ class Pipe:
 
         # State Variables
         self.model_outputs: Dict[str, str] = {}
+        self.model_names: Dict[str, str] = {}  # Map model IDs to names
         self.completed_contributors: set = set()
         self.interrupted_contributors: set = set()
         self.consensus_output: Optional[str] = None
@@ -213,6 +214,7 @@ class Pipe:
     def reset_state(self):
         """Reset state variables for reuse in new requests."""
         self.model_outputs = {}
+        self.model_names = {}  # Reset model names
         self.completed_contributors = set()
         self.interrupted_contributors = set()
         self.consensus_output = None
@@ -279,114 +281,6 @@ class Pipe:
         else:
             return "unsupported"
 
-    async def determine_contributing_models(
-        self, body: dict, __user__: Optional[dict] = None
-    ) -> List[Dict[str, str]]:
-        """
-        Determine the contributing models to query based on the selected meta-model.
-
-        Args:
-            body (dict): The incoming request payload.
-            __user__ (Optional[dict]): User information.
-
-        Returns:
-            List[Dict[str, str]]: List of contributing models to query.
-        """
-        self.log_debug("[DETERMINE_CONTRIBUTORS] Starting model selection process.")
-
-        # Extract and strip the meta-model ID using the manifold prefix
-        model_id = body.get("model", "")
-        if self.valves.manifold_prefix in model_id:
-            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # STRIP_OPERATION: Strips prefix
-            self.log_debug(f"Stripped meta-model ID: {meta_model}")
-        else:
-            meta_model = model_id
-            self.log_debug(f"Meta-model ID remains unchanged: {meta_model}")
-
-        # Determine the mode
-        mode = self.determine_mode(meta_model)
-        self.current_mode = mode  # Store the mode in self for later use
-        self.log_debug(f"[DETERMINE_CONTRIBUTORS] Determined selection mode: {mode}")
-
-        # Select models based on the mode
-        if mode == "random":
-            # Fetch random contributing models dynamically
-            try:
-                selected_model_ids = await self.fetch_available_contributing_models()
-
-                # Log the selected model IDs
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Selected model IDs: {selected_model_ids}")
-
-                # Create a list of model dictionaries with 'id' and 'name'
-                selected_models = [
-                    {"id": model_id, "name": f"random-{model_id}"}
-                    for model_id in selected_model_ids
-                ]
-
-                self.log_debug(
-                    f"[DETERMINE_CONTRIBUTORS] Selected random contributing models: {selected_models}"
-                )
-                return selected_models
-            except Exception as e:
-                self.log_debug(
-                    f"[DETERMINE_CONTRIBUTORS] Error selecting random contributing models: {e}"
-                )
-                raise ValueError(
-                    f"[DETERMINE_CONTRIBUTORS] Failed to fetch random contributing models: {e}"
-                )
-
-        elif mode == "explicit":
-            # Use explicit contributing models defined in the valves
-            if not self.valves.explicit_contributing_models:
-                raise ValueError(
-                    "[DETERMINE_CONTRIBUTORS] No explicit contributing models configured."
-                )
-            models = [
-                {"id": model, "name": f"explicit-{model}"}
-                for model in self.valves.explicit_contributing_models
-            ]
-            self.log_debug(
-                f"[DETERMINE_CONTRIBUTORS] Selected explicit contributing models: {models}"
-            )
-            return models
-
-        elif mode == "tags":
-            # Use tag-based contributing model selection
-            tags = self.parse_tags(self.valves.contributor_tags)
-            if not tags:
-                raise ValueError(
-                    "[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models."
-                )
-            try:
-                selected_model_ids = await self.fetch_available_contributing_models()
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Selected model IDs based on tags: {selected_model_ids}")
-
-                # Create a list of model dictionaries with 'id' and 'name'
-                selected_models = [
-                    {"id": model_id, "name": f"tag-{model_id}"}
-                    for model_id in selected_model_ids
-                ]
-
-                self.log_debug(
-                    f"[DETERMINE_CONTRIBUTORS] Selected tag-based contributing models: {selected_models}"
-                )
-                return selected_models
-            except Exception as e:
-                self.log_debug(
-                    f"[DETERMINE_CONTRIBUTORS] Error selecting tag-based contributing models: {e}"
-                )
-                raise ValueError(
-                    f"[DETERMINE_CONTRIBUTORS] Failed to fetch tag-based contributing models: {e}"
-                )
-
-        else:
-            # Invalid or unsupported mode
-            error_message = (
-                f"[DETERMINE_CONTRIBUTORS] Unsupported selection mode: {mode}"
-            )
-            self.log_debug(error_message)
-            raise ValueError(error_message)
-            
     async def fetch_available_contributing_models(self) -> List[str]:
         """
         Fetch available contributing models from the Models router and select a subset
@@ -408,24 +302,26 @@ class Pipe:
             else:
                 raise ValueError("[FETCH_CONTRIBUTORS] Invalid response structure from get_models.")
 
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available_models: {[model['id'] for model in available_models]}")
+            self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available models: {[model['id'] for model in available_models]}")
 
-            # Parse tags only if the current mode is "tags"
+            # Update self.model_names with all available models
+            for model in available_models:
+                self.model_names[model["id"]] = model.get("name", model["id"])
+            self.log_debug(f"[FETCH_CONTRIBUTORS] Updated model_names: {self.model_names}")
+
+            # Parse tags and filter models if the current mode is "tags"
             if self.current_mode == "tags":
                 tags = self.parse_tags(self.valves.contributor_tags)
                 self.log_debug(f"[FETCH_CONTRIBUTORS] Filtering models using tags: {tags}")
 
                 if tags:
-                    # Convert tags to lowercase for case-insensitive matching
                     required_tags = set(tag.lower() for tag in tags)
-                    # Filter models by tags (case-insensitive)
                     available_models = [
                         model for model in available_models
                         if required_tags.intersection(
                             {tag.get("name", "").lower() for tag in model.get("info", {}).get("meta", {}).get("tags", [])}
                         )
                     ]
-
                     self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}")
                 else:
                     self.log_debug("[FETCH_CONTRIBUTORS] No valid tags provided for filtering.")
@@ -439,23 +335,19 @@ class Pipe:
                 self.log_debug(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
                 raise ValueError(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
 
-            # Normalize and filter out models that match the blacklist regex
+            # Filter models that match the blacklist regex
             available_models = [
                 model for model in available_models
-                if not blacklist_regex.search(model.get("id", "").lower())  # Normalize ID to lowercase
+                if not blacklist_regex.search(model.get("id", "").lower())
             ]
-
             self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in available_models]}")
 
+            # Check if any models remain after filtering
             if not available_models:
                 raise ValueError("[FETCH_CONTRIBUTORS] No models available after filtering.")
 
-            # Select models based on other logic (e.g., random selection)
-            # Here, we'll select up to `random_contributing_models_number` models randomly
-            num_models_to_select = min(
-                self.valves.random_contributing_models_number,
-                len(available_models)
-            )
+            # Select a random subset of models
+            num_models_to_select = min(self.valves.random_contributing_models_number, len(available_models))
             selected_model_ids = random.sample([model["id"] for model in available_models], num_models_to_select)
             self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}")
 
@@ -507,6 +399,118 @@ class Pipe:
             f"[PREPARE_PAYLOADS] Prepared payloads for contributing models: {list(payloads.keys())}"
         )
         return payloads
+
+    async def determine_contributing_models(
+        self, body: dict, __user__: Optional[dict] = None
+    ) -> List[Dict[str, str]]:
+        """
+        Determine the contributing models to query based on the selected meta-model.
+
+        Args:
+            body (dict): The incoming request payload.
+            __user__ (Optional[dict]): User information.
+
+        Returns:
+            List[Dict[str, str]]: List of contributing models to query.
+        """
+        self.log_debug("[DETERMINE_CONTRIBUTORS] Starting model selection process.")
+
+        # Extract and strip the meta-model ID using the manifold prefix
+        model_id = body.get("model", "")
+        if self.valves.manifold_prefix in model_id:
+            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # STRIP_OPERATION: Strips prefix
+            self.log_debug(f"Stripped meta-model ID: {meta_model}")
+        else:
+            meta_model = model_id
+            self.log_debug(f"Meta-model ID remains unchanged: {meta_model}")
+
+        # Determine the mode
+        mode = self.determine_mode(meta_model)
+        self.current_mode = mode  # Store the mode in self for later use
+        self.log_debug(f"[DETERMINE_CONTRIBUTORS] Determined selection mode: {mode}")
+
+        # Fetch available models to create a name lookup
+        try:
+            available_models_response = await get_models(user=mock_user)
+            if not available_models_response or "data" not in available_models_response:
+                self.log_debug("[DETERMINE_CONTRIBUTORS] Failed to retrieve model metadata.")
+                available_models = []
+            else:
+                available_models = available_models_response["data"]
+
+            # Build a lookup for model names
+            model_name_lookup = {
+                model["id"]: model.get("name", model["id"]) for model in available_models
+            }
+            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Model name lookup created: {model_name_lookup}")
+
+        except Exception as e:
+            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error fetching model metadata: {e}")
+            model_name_lookup = {}
+
+        # Select models based on the mode
+        if mode == "random":
+            try:
+                selected_model_ids = await self.fetch_available_contributing_models()
+
+                # Create a list of model dictionaries with 'id' and 'name'
+                selected_models = [
+                    {"id": model_id, "name": f"Random - {model_name_lookup.get(model_id, model_id)}"}
+                    for model_id in selected_model_ids
+                ]
+
+                # Update self.model_names
+                for model in selected_models:
+                    self.model_names[model["id"]] = model["name"]
+                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+
+                return selected_models
+            except Exception as e:
+                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error selecting random models: {e}")
+                raise ValueError(f"[DETERMINE_CONTRIBUTORS] Failed to fetch random models: {e}")
+
+        elif mode == "explicit":
+            if not self.valves.explicit_contributing_models:
+                raise ValueError("[DETERMINE_CONTRIBUTORS] No explicit contributing models configured.")
+
+            models = [
+                {"id": model, "name": f"Explicit - {model_name_lookup.get(model, model)}"}
+                for model in self.valves.explicit_contributing_models
+            ]
+
+            # Update self.model_names
+            for model in models:
+                self.model_names[model["id"]] = model["name"]
+            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+
+            return models
+
+        elif mode == "tags":
+            tags = self.parse_tags(self.valves.contributor_tags)
+            if not tags:
+                raise ValueError("[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models.")
+            try:
+                selected_model_ids = await self.fetch_available_contributing_models()
+
+                selected_models = [
+                    {"id": model_id, "name": f"{model_name_lookup.get(model_id, model_id)}"}
+                    for model_id in selected_model_ids
+                ]
+
+                # Update self.model_names
+                for model in selected_models:
+                    self.model_names[model["id"]] = model["name"]
+                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+
+                return selected_models
+            except Exception as e:
+                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error selecting tag-based models: {e}")
+                raise ValueError(f"[DETERMINE_CONTRIBUTORS] Failed to fetch tag-based models: {e}")
+
+        else:
+            error_message = f"[DETERMINE_CONTRIBUTORS] Unsupported selection mode: {mode}"
+            self.log_debug(error_message)
+            raise ValueError(error_message)
 
     def pipes(self) -> List[dict]:
         """
@@ -604,15 +608,27 @@ class Pipe:
                 )
                 return {"model": model_id, "error": "Unexpected response type."}
 
-            # Emit collapsible for this contributing model without <pre> tags
+            # If summaries are enabled, generate a summary
+            if self.valves.enable_llm_summaries:
+                self.log_debug(f"[QUERY_CONTRIBUTOR] Summaries enabled. Generating summary for model {model_id}.")
+                summary = await self.generate_summary(collected_output, model_id)
+                self.log_debug(f"[QUERY_CONTRIBUTOR] Generated summary for model {model_id}: {summary}")
+                summary_text = summary
+                summary_suffix = f": {summary_text}"
+            else:
+                self.log_debug(f"[QUERY_CONTRIBUTOR] Summaries disabled. Using default summary.")
+                summary_suffix = " Output"
+
+            # Emit collapsible for this contributing model with or without summary
+            model_name = self.model_names.get(model_id, model_id)
             collapsible_content = f"""
 <details>
-<summary>Model {model_id} Output</summary>
-{self.escape_html(collected_output)}
+<summary>{model_name}{summary_suffix}</summary>
+{html.unescape(collected_output)}
 </details>
 """.strip()
 
-            self.log_debug(f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id}.")
+            self.log_debug(f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id} with summary.")
 
             await __event_emitter__(
                 {
@@ -631,6 +647,57 @@ class Pipe:
             if isinstance(e, aiohttp.ClientResponseError) and e.status == 429:
                 return {"model": model_id, "error": "rate_limit"}
             return {"model": model_id, "error": str(e)}
+
+    async def generate_summary(self, text: str, model_id: str) -> str:
+        """
+        Generate a summary of the given text using the progress summary model.
+
+        Args:
+            text (str): The text to summarize.
+            model_id (str): The ID of the model being summarized.
+
+        Returns:
+            str: The generated summary (excluding the model name).
+        """
+        self.log_debug(f"[GENERATE_SUMMARY] Generating summary for model {model_id}.")
+        summary_model_id = self.valves.response_summary_model_id
+        summary_system_prompt = self.valves.response_summary_system_prompt
+        summary_user_prompt = self.valves.response_summary_status_prompt + ": " + text
+
+        payload = {
+            "model": summary_model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": summary_system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": summary_user_prompt
+                }
+            ],
+            "stream": False,  # Summary generation does not need streaming
+        }
+
+        try:
+            response = await generate_chat_completions(
+                form_data=payload, user=mock_user, bypass_filter=True
+            )
+
+            if isinstance(response, dict):
+                try:
+                    summary = response["choices"][0]["message"]["content"].strip()
+                    self.log_debug(f"[GENERATE_SUMMARY] Generated summary: {summary}")
+                    return summary  # Return only the summary, without the model name
+                except (KeyError, IndexError) as e:
+                    self.log_debug(f"[GENERATE_SUMMARY] Missing 'content' in summary response: {e}")
+                    return "No summary available."
+            else:
+                self.log_debug(f"[GENERATE_SUMMARY] Unexpected response type: {type(response)}")
+                return "No summary available."
+        except Exception as e:
+            self.log_debug(f"[GENERATE_SUMMARY] Error generating summary: {e}")
+            return "No summary available."
 
     async def handle_json_response(self, response: Union[JSONResponse, bytes, str]) -> dict:
         """
@@ -797,9 +864,9 @@ class Pipe:
             "No user query provided."
         )
 
-        # Prepare a clear delineation of outputs
+        # Prepare a clear delineation of outputs with model names
         delineated_outputs = "\n\n".join(
-            f"Model {model_id}:\n{output}"
+            f"Model {self.model_names.get(model_id, model_id)}:\n{output}"
             for model_id, output in self.model_outputs.items()
         )
 
@@ -967,12 +1034,12 @@ class Pipe:
             self.log_debug("[EMIT_COLLAPSIBLE] No model outputs to emit.")
             return
 
-        # Generate collapsible sections for each model without <pre> tags
+        # Generate collapsible sections for each model without <pre> tags and with proper HTML parsing
         collapsible_content = "\n".join(
             f"""
 <details>
-<summary>Model {model_id} Output</summary>
-{self.escape_html(output)}
+<summary>{self.model_names.get(model_id, model_id)} Output</summary>
+{html.unescape(output)}
 </details>
 """.strip()
             for model_id, output in self.model_outputs.items()
