@@ -71,7 +71,7 @@ class Pipe:
             description="How many models should be selected for contribution.",
         )
         random_contributing_models_blacklist_regex: str = Field(
-            default="(embed|vision|whisper|pipe|manifold)",
+            default="(embed|vision|whisper|pipe|manifold|action)",
             description="Regular expression to exclude models from random selection.",
         )
         enable_explicit_contributors: bool = Field(
@@ -273,7 +273,9 @@ class Pipe:
             return "random"
         elif meta_model_id.startswith("explicit"):
             return "explicit"
-        elif meta_model_id.startswith("tag"):
+        elif meta_model_id.startswith("tag-"):
+            # Strip the "tag-" prefix
+            self.valves.contributor_tags = meta_model_id[4:]  # Update tags to match the prefix
             return "tags"
         else:
             return "unsupported"
@@ -356,11 +358,27 @@ class Pipe:
                 raise ValueError(
                     "[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models."
                 )
-            models = [{"id": tag, "name": f"tag-{tag}"} for tag in tags]
-            self.log_debug(
-                f"[DETERMINE_CONTRIBUTORS] Selected tag-based contributing models: {models}"
-            )
-            return models
+            try:
+                selected_model_ids = await self.fetch_available_contributing_models(tags=tags)
+                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Selected model IDs based on tags: {selected_model_ids}")
+
+                # Create a list of model dictionaries with 'id' and 'name'
+                selected_models = [
+                    {"id": model_id, "name": f"tag-{model_id}"}
+                    for model_id in selected_model_ids
+                ]
+
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Selected tag-based contributing models: {selected_models}"
+                )
+                return selected_models
+            except Exception as e:
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Error selecting tag-based contributing models: {e}"
+                )
+                raise ValueError(
+                    f"[DETERMINE_CONTRIBUTORS] Failed to fetch tag-based contributing models: {e}"
+                )
 
         else:
             # Invalid or unsupported mode
@@ -369,12 +387,11 @@ class Pipe:
             )
             self.log_debug(error_message)
             raise ValueError(error_message)
-
+            
     async def fetch_available_contributing_models(self) -> List[str]:
         """
-        Fetch available contributing models from the Models router and select a random subset
-        with an emphasis on distributing selection across unique urlIdx values,
-        while excluding models matching the blacklist regex.
+        Fetch available contributing models from the Models router and select a subset
+        with tag filtering and other constraints.
 
         Returns:
             List[str]: List of selected contributing model IDs.
@@ -394,72 +411,44 @@ class Pipe:
 
             self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available_models: {available_models}")
 
+            # Parse tags only if the current mode is "tags"
+            if self.current_mode == "tags":
+                tags = self.parse_tags(self.valves.contributor_tags)
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Filtering models using tags: {tags}")
+
+                # Filter models by tags
+                required_tags = set(tags)
+                available_models = [
+                    model for model in available_models
+                    if required_tags.intersection(
+                        {tag.get("name", "") for tag in model.get("meta", {}).get("tags", [])}
+                    )
+                ]
+
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}")
+
             # Apply blacklist regex to exclude certain models
             blacklist_pattern = self.valves.random_contributing_models_blacklist_regex
-            try:
-                blacklist_regex = re.compile(blacklist_pattern, re.IGNORECASE)
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Compiled blacklist regex: {blacklist_pattern}")
-            except re.error as e:
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
-                raise ValueError(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
-
-            # Normalize and filter out models that match the blacklist regex
-            filtered_models = [
+            blacklist_regex = re.compile(blacklist_pattern, re.IGNORECASE)
+            available_models = [
                 model for model in available_models
-                if not blacklist_regex.search(model.get("id", "").lower())  # Normalize ID to lowercase
+                if not blacklist_regex.search(model.get("id", "").lower())
             ]
 
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in filtered_models]}")
+            self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in available_models]}")
 
-            if not filtered_models:
-                raise ValueError("[FETCH_CONTRIBUTORS] No models available after applying blacklist.")
+            if not available_models:
+                raise ValueError("[FETCH_CONTRIBUTORS] No models available after filtering.")
 
-            # Extract models and group by urlIdx
-            models_by_urlIdx = {}
-            for model in filtered_models:
-                urlIdx = model.get("urlIdx", -1)  # Default to -1 if urlIdx is missing
-                if urlIdx not in models_by_urlIdx:
-                    models_by_urlIdx[urlIdx] = []
-                models_by_urlIdx[urlIdx].append(model["id"])
-
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Models grouped by urlIdx: {models_by_urlIdx}")
-
-            # Ensure there are enough unique urlIdx groups
-            unique_urlIdx_count = len(models_by_urlIdx)
-            if unique_urlIdx_count == 0:
-                raise ValueError("[FETCH_CONTRIBUTORS] No valid urlIdx found in available models.")
-
-            # Determine how many models to select
-            num_models_to_select = min(
-                self.valves.random_contributing_models_number,
-                sum(len(models) for models in models_by_urlIdx.values())  # Total available models
-            )
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Number of models to select: {num_models_to_select}")
-
-            if num_models_to_select <= 0:
-                raise ValueError("[FETCH_CONTRIBUTORS] Number of models to select must be at least 1.")
-
-            # Distribute selection across urlIdx groups
-            selected_model_ids = []
-            for urlIdx, models in models_by_urlIdx.items():
-                # Calculate the proportion of models to select from this group
-                proportion = max(1, num_models_to_select // unique_urlIdx_count)
-                selected_models = random.sample(models, min(proportion, len(models)))
-                selected_model_ids.extend(selected_models)
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Selected models from urlIdx {urlIdx}: {selected_models}")
-
-            # Shuffle to add more randomness
-            random.shuffle(selected_model_ids)
-
-            # Limit to the desired number of models
-            selected_model_ids = selected_model_ids[:num_models_to_select]
+            # Select models based on other logic (e.g., random selection)
+            selected_model_ids = [model["id"] for model in available_models]
             self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}")
 
             return selected_model_ids
 
         except Exception as e:
             self.log_debug(f"[FETCH_CONTRIBUTORS] Error fetching contributing models: {e}")
-            raise ValueError(f"[FETCH_CONTRIBUTORS] Failed to fetch random contributing models: {e}")
+            raise ValueError(f"[FETCH_CONTRIBUTORS] Failed to fetch contributing models: {e}")
 
     async def prepare_payloads(
         self, models: List[Dict[str, str]], messages: List[Dict[str, Any]]
@@ -606,7 +595,7 @@ class Pipe:
 <summary>Model {model_id} Output</summary>
 {self.escape_html(collected_output)}
 </details>
-""" # .strip()
+""".strip()
 
             self.log_debug(f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id}.")
 
@@ -747,7 +736,7 @@ class Pipe:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
         self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output}")
-        return collected_output # do not .strip()
+        return collected_output  # do not .strip()
 
     def ensure_newlines(self, content: str) -> str:
         """
@@ -761,7 +750,6 @@ class Pipe:
         """
         # Replace multiple spaces with a single space and ensure proper line breaks
         return "\n".join(line.strip() for line in content.splitlines() if line.strip())
-
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -877,7 +865,6 @@ class Pipe:
                 f"Consensus generation failed: {str(e)}",
                 done=True,
             )
-
 
     async def emit_status(
         self,
