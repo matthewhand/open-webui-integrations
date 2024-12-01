@@ -1,6 +1,9 @@
 """
+
 - [x] Fixed manifold prefix 'consensus/' instead of 'Consensus/'
+
 """
+
 import os
 import json
 import time
@@ -23,6 +26,7 @@ from open_webui.main import (
 )
 import aiohttp  # Added to handle ClientResponseError
 
+
 # Define the User class with required attributes
 @dataclass
 class User:
@@ -31,6 +35,7 @@ class User:
     name: str  # Added the 'name' attribute
     role: str
     email: str  # Ensures 'email' attribute is present
+
 
 # Instantiate the mock_user with all necessary attributes, including 'name'
 mock_user = User(
@@ -43,12 +48,14 @@ mock_user = User(
 
 # Global Placeholders
 CONSENSUS_PLACEHOLDER = "your-consensus-model-id-goes-here"
+EXPLICIT_MODELS = "your-explicit_contributing_model-ids-go-here"
 RESPONSE_SUMMARY_PLACEHOLDER = "your-progress-model-id-goes-here"
 TAGS_PLACEHOLDER = "comma-separated-list-of-model-tags-goes-here"
 CONSENSUS_SYSTEM_PROMPT_DEFAULT = (
     "Only report on the consensus across the output provided from multiple models."
 )
 RESPONSE_SUMMARY_STATUS_PROMPT_DEFAULT = "Summarize in exactly 5 words or less."
+
 
 class Pipe:
     """
@@ -71,7 +78,7 @@ class Pipe:
             description="How many models should be selected for contribution.",
         )
         random_contributing_models_blacklist_regex: str = Field(
-            default="(embed|vision|whisper|pipe|manifold|action)",
+            default="(arena|embed|vision|whisper|pipe|manifold|action)",
             description="Regular expression to exclude models from random selection.",
         )
         enable_explicit_contributors: bool = Field(
@@ -79,7 +86,7 @@ class Pipe:
             description="Enable explicit (user-specified) contributing model selection if provided (false by default).",
         )
         explicit_contributing_models: List[str] = Field(
-            default=[],
+            default=EXPLICIT_MODELS,
             description="List of specific contributing models to use when explicit selection is enabled.",
         )
         enable_tagged_contributors: bool = Field(
@@ -91,7 +98,7 @@ class Pipe:
             description="Comma-separated list of tags for contributing model selection.",
         )
         manifold_prefix: str = Field(
-            default="Consensus/",
+            default="consensus/",
             description="Prefix used for consensus models.",
         )
         consensus_model_id: str = Field(
@@ -193,7 +200,9 @@ class Pipe:
             False  # Flag to indicate if final status is emitted
         )
         self.tags_detected: bool = False  # Flag for tag detection
-        self.consensus_streamed: bool = False  # Flag to indicate if consensus is streamed
+        self.consensus_streamed: bool = (
+            False  # Flag to indicate if consensus is streamed
+        )
 
         # Logging Setup
         self.log = logging.getLogger(self.__class__.__name__)
@@ -278,8 +287,12 @@ class Pipe:
         elif meta_model_id.startswith("tag-"):
             # Strip the "tag-" prefix and update contributor_tags
             stripped_tags = meta_model_id[4:]  # Removes 'tag-' prefix
-            self.valves.contributor_tags = stripped_tags  # Update tags to match the prefix
-            self.log_debug(f"[DETERMINE_MODE] Updated contributor_tags to: {stripped_tags}")
+            self.valves.contributor_tags = (
+                stripped_tags  # Update tags to match the prefix
+            )
+            self.log_debug(
+                f"[DETERMINE_MODE] Updated contributor_tags to: {stripped_tags}"
+            )
             return "tags"
         else:
             return "unsupported"
@@ -296,69 +309,113 @@ class Pipe:
             ValueError: If no models are available or insufficient models are found.
         """
         try:
-            self.log_debug("[FETCH_CONTRIBUTORS] Fetching available contributing models...")
+            self.log_debug(
+                "[FETCH_CONTRIBUTORS] Fetching available contributing models..."
+            )
             available_models_response = await get_models(user=mock_user)
 
             # Extract the list of models from the "data" key
-            if isinstance(available_models_response, dict) and "data" in available_models_response:
+            if (
+                isinstance(available_models_response, dict)
+                and "data" in available_models_response
+            ):
                 available_models = available_models_response["data"]
             else:
-                raise ValueError("[FETCH_CONTRIBUTORS] Invalid response structure from get_models.")
+                raise ValueError(
+                    "[FETCH_CONTRIBUTORS] Invalid response structure from get_models."
+                )
 
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Raw available models: {[model['id'] for model in available_models]}")
+            self.log_debug(
+                f"[FETCH_CONTRIBUTORS] Raw available models: {[model['id'] for model in available_models]}"
+            )
 
             # Update self.model_names with all available models
             for model in available_models:
                 self.model_names[model["id"]] = model.get("name", model["id"])
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Updated model_names: {self.model_names}")
+            self.log_debug(
+                f"[FETCH_CONTRIBUTORS] Updated model_names: {self.model_names}"
+            )
 
             # Parse tags and filter models if the current mode is "tags"
             if self.current_mode == "tags":
                 tags = self.parse_tags(self.valves.contributor_tags)
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Filtering models using tags: {tags}")
+                self.log_debug(
+                    f"[FETCH_CONTRIBUTORS] Filtering models using tags: {tags}"
+                )
 
                 if tags:
                     required_tags = set(tag.lower() for tag in tags)
                     available_models = [
-                        model for model in available_models
+                        model
+                        for model in available_models
                         if required_tags.intersection(
-                            {tag.get("name", "").lower() for tag in model.get("info", {}).get("meta", {}).get("tags", [])}
+                            {
+                                tag.get("name", "").lower()
+                                for tag in model.get("info", {})
+                                .get("meta", {})
+                                .get("tags", [])
+                            }
                         )
                     ]
-                    self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}")
+                    self.log_debug(
+                        f"[FETCH_CONTRIBUTORS] Models after applying tag filter: {[model['id'] for model in available_models]}"
+                    )
                 else:
-                    self.log_debug("[FETCH_CONTRIBUTORS] No valid tags provided for filtering.")
+                    self.log_debug(
+                        "[FETCH_CONTRIBUTORS] No valid tags provided for filtering."
+                    )
 
             # Apply blacklist regex to exclude certain models
             blacklist_pattern = self.valves.random_contributing_models_blacklist_regex
             try:
                 blacklist_regex = re.compile(blacklist_pattern, re.IGNORECASE)
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Compiled blacklist regex: {blacklist_pattern}")
+                self.log_debug(
+                    f"[FETCH_CONTRIBUTORS] Compiled blacklist regex: {blacklist_pattern}"
+                )
             except re.error as e:
-                self.log_debug(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
-                raise ValueError(f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}")
+                self.log_debug(
+                    f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}"
+                )
+                raise ValueError(
+                    f"[FETCH_CONTRIBUTORS] Invalid blacklist regex pattern: {blacklist_pattern}. Error: {e}"
+                )
 
             # Filter models that match the blacklist regex
             available_models = [
-                model for model in available_models
+                model
+                for model in available_models
                 if not blacklist_regex.search(model.get("id", "").lower())
             ]
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in available_models]}")
+            self.log_debug(
+                f"[FETCH_CONTRIBUTORS] Models after applying blacklist: {[model['id'] for model in available_models]}"
+            )
 
             # Check if any models remain after filtering
             if not available_models:
-                raise ValueError("[FETCH_CONTRIBUTORS] No models available after filtering.")
+                raise ValueError(
+                    "[FETCH_CONTRIBUTORS] No models available after filtering."
+                )
 
             # Select a random subset of models
-            num_models_to_select = min(self.valves.random_contributing_models_number, len(available_models))
-            selected_model_ids = random.sample([model["id"] for model in available_models], num_models_to_select)
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}")
+            num_models_to_select = min(
+                self.valves.random_contributing_models_number, len(available_models)
+            )
+            selected_model_ids = random.sample(
+                [model["id"] for model in available_models], num_models_to_select
+            )
+            self.log_debug(
+                f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}"
+            )
 
             return selected_model_ids
 
         except Exception as e:
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Error fetching contributing models: {e}")
-            raise ValueError(f"[FETCH_CONTRIBUTORS] Failed to fetch contributing models: {e}")
+            self.log_debug(
+                f"[FETCH_CONTRIBUTORS] Error fetching contributing models: {e}"
+            )
+            raise ValueError(
+                f"[FETCH_CONTRIBUTORS] Failed to fetch contributing models: {e}"
+            )
 
     async def prepare_payloads(
         self, models: List[Dict[str, str]], messages: List[Dict[str, Any]]
@@ -387,7 +444,8 @@ class Pipe:
                         "content": (
                             self.clean_message_content(message.get("content", ""))
                             if self.valves.strip_collapsible_tags
-                            and message["role"] == "assistant"  # STRIP_OPERATION: Conditional stripping
+                            and message["role"]
+                            == "assistant"  # STRIP_OPERATION: Conditional stripping
                             else message.get("content", "")
                         ),
                     }
@@ -421,7 +479,9 @@ class Pipe:
         # Extract and strip the meta-model ID using the manifold prefix
         model_id = body.get("model", "")
         if self.valves.manifold_prefix in model_id:
-            meta_model = model_id.split(self.valves.manifold_prefix, 1)[1]  # STRIP_OPERATION: Strips prefix
+            meta_model = model_id.split(self.valves.manifold_prefix, 1)[
+                1
+            ]  # STRIP_OPERATION: Strips prefix
             self.log_debug(f"Stripped meta-model ID: {meta_model}")
         else:
             meta_model = model_id
@@ -436,19 +496,26 @@ class Pipe:
         try:
             available_models_response = await get_models(user=mock_user)
             if not available_models_response or "data" not in available_models_response:
-                self.log_debug("[DETERMINE_CONTRIBUTORS] Failed to retrieve model metadata.")
+                self.log_debug(
+                    "[DETERMINE_CONTRIBUTORS] Failed to retrieve model metadata."
+                )
                 available_models = []
             else:
                 available_models = available_models_response["data"]
 
             # Build a lookup for model names
             model_name_lookup = {
-                model["id"]: model.get("name", model["id"]) for model in available_models
+                model["id"]: model.get("name", model["id"])
+                for model in available_models
             }
-            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Model name lookup created: {model_name_lookup}")
+            self.log_debug(
+                f"[DETERMINE_CONTRIBUTORS] Model name lookup created: {model_name_lookup}"
+            )
 
         except Exception as e:
-            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error fetching model metadata: {e}")
+            self.log_debug(
+                f"[DETERMINE_CONTRIBUTORS] Error fetching model metadata: {e}"
+            )
             model_name_lookup = {}
 
         # Select models based on the mode
@@ -458,60 +525,89 @@ class Pipe:
 
                 # Create a list of model dictionaries with 'id' and 'name'
                 selected_models = [
-                    {"id": model_id, "name": f"Random - {model_name_lookup.get(model_id, model_id)}"}
+                    {
+                        "id": model_id,
+                        "name": f"Random - {model_name_lookup.get(model_id, model_id)}",
+                    }
                     for model_id in selected_model_ids
                 ]
 
                 # Update self.model_names
                 for model in selected_models:
                     self.model_names[model["id"]] = model["name"]
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}"
+                )
 
                 return selected_models
             except Exception as e:
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error selecting random models: {e}")
-                raise ValueError(f"[DETERMINE_CONTRIBUTORS] Failed to fetch random models: {e}")
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Error selecting random models: {e}"
+                )
+                raise ValueError(
+                    f"[DETERMINE_CONTRIBUTORS] Failed to fetch random models: {e}"
+                )
 
         elif mode == "explicit":
             if not self.valves.explicit_contributing_models:
-                raise ValueError("[DETERMINE_CONTRIBUTORS] No explicit contributing models configured.")
+                raise ValueError(
+                    "[DETERMINE_CONTRIBUTORS] No explicit contributing models configured."
+                )
 
             models = [
-                {"id": model, "name": f"Explicit - {model_name_lookup.get(model, model)}"}
+                {
+                    "id": model,
+                    "name": f"Explicit - {model_name_lookup.get(model, model)}",
+                }
                 for model in self.valves.explicit_contributing_models
             ]
 
             # Update self.model_names
             for model in models:
                 self.model_names[model["id"]] = model["name"]
-            self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+            self.log_debug(
+                f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}"
+            )
 
             return models
 
         elif mode == "tags":
             tags = self.parse_tags(self.valves.contributor_tags)
             if not tags:
-                raise ValueError("[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models.")
+                raise ValueError(
+                    "[DETERMINE_CONTRIBUTORS] No valid tags provided for contributing models."
+                )
             try:
                 selected_model_ids = await self.fetch_available_contributing_models()
 
                 selected_models = [
-                    {"id": model_id, "name": f"{model_name_lookup.get(model_id, model_id)}"}
+                    {
+                        "id": model_id,
+                        "name": f"{model_name_lookup.get(model_id, model_id)}",
+                    }
                     for model_id in selected_model_ids
                 ]
 
                 # Update self.model_names
                 for model in selected_models:
                     self.model_names[model["id"]] = model["name"]
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}")
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Updated model_names: {self.model_names}"
+                )
 
                 return selected_models
             except Exception as e:
-                self.log_debug(f"[DETERMINE_CONTRIBUTORS] Error selecting tag-based models: {e}")
-                raise ValueError(f"[DETERMINE_CONTRIBUTORS] Failed to fetch tag-based models: {e}")
+                self.log_debug(
+                    f"[DETERMINE_CONTRIBUTORS] Error selecting tag-based models: {e}"
+                )
+                raise ValueError(
+                    f"[DETERMINE_CONTRIBUTORS] Failed to fetch tag-based models: {e}"
+                )
 
         else:
-            error_message = f"[DETERMINE_CONTRIBUTORS] Unsupported selection mode: {mode}"
+            error_message = (
+                f"[DETERMINE_CONTRIBUTORS] Unsupported selection mode: {mode}"
+            )
             self.log_debug(error_message)
             raise ValueError(error_message)
 
@@ -526,9 +622,7 @@ class Pipe:
 
         # Register random contributing models if enabled
         if self.valves.enable_random_contributors:
-            model_categories.append(
-                {"id": "consensus/random", "name": "Random"}
-            )
+            model_categories.append({"id": "consensus/random", "name": "Random"})
             self.log_debug("[PIPES] Registered category: consensus/random")
 
         # Register explicit contributing models if enabled
@@ -536,9 +630,7 @@ class Pipe:
             self.valves.enable_explicit_contributors
             and self.valves.explicit_contributing_models
         ):
-            model_categories.append(
-                {"id": "consensus/explicit", "name": "Explicit"}
-            )
+            model_categories.append({"id": "consensus/explicit", "name": "Explicit"})
             self.log_debug("[PIPES] Registered category: consensus/explicit")
 
         # Register tag-based contributing models if enabled
@@ -561,7 +653,10 @@ class Pipe:
         return model_categories
 
     async def query_contributing_model(
-        self, model_id: str, payload: dict, __event_emitter__: Callable[[dict], Awaitable[None]]
+        self,
+        model_id: str,
+        payload: dict,
+        __event_emitter__: Callable[[dict], Awaitable[None]],
     ) -> Dict[str, str]:
         """
         Query a contributing model and emit its collapsible output immediately upon receiving the response.
@@ -579,7 +674,9 @@ class Pipe:
         )
         try:
             # Log that we're about to query the model
-            self.log_debug(f"[QUERY_CONTRIBUTOR] Attempting to query model {model_id}...")
+            self.log_debug(
+                f"[QUERY_CONTRIBUTOR] Attempting to query model {model_id}..."
+            )
 
             response = await generate_chat_completions(
                 form_data=payload, user=mock_user, bypass_filter=True
@@ -604,7 +701,10 @@ class Pipe:
                     self.log_debug(
                         f"[QUERY_CONTRIBUTOR] Missing 'content' key in response from {model_id}: {e}"
                     )
-                    return {"model": model_id, "error": "Missing 'content' key in response."}
+                    return {
+                        "model": model_id,
+                        "error": "Missing 'content' key in response.",
+                    }
             else:
                 self.log_debug(
                     f"[QUERY_CONTRIBUTOR] Unexpected response type: {type(response)}"
@@ -613,13 +713,19 @@ class Pipe:
 
             # If summaries are enabled, generate a summary
             if self.valves.enable_llm_summaries:
-                self.log_debug(f"[QUERY_CONTRIBUTOR] Summaries enabled. Generating summary for model {model_id}.")
+                self.log_debug(
+                    f"[QUERY_CONTRIBUTOR] Summaries enabled. Generating summary for model {model_id}."
+                )
                 summary = await self.generate_summary(collected_output, model_id)
-                self.log_debug(f"[QUERY_CONTRIBUTOR] Generated summary for model {model_id}: {summary}")
+                self.log_debug(
+                    f"[QUERY_CONTRIBUTOR] Generated summary for model {model_id}: {summary}"
+                )
                 summary_text = summary
                 summary_suffix = f": {summary_text}"
             else:
-                self.log_debug(f"[QUERY_CONTRIBUTOR] Summaries disabled. Using default summary.")
+                self.log_debug(
+                    f"[QUERY_CONTRIBUTOR] Summaries disabled. Using default summary."
+                )
                 summary_suffix = " Output"
 
             # Emit collapsible for this contributing model with or without summary
@@ -631,7 +737,9 @@ class Pipe:
 </details>
 """.strip()
 
-            self.log_debug(f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id} with summary.")
+            self.log_debug(
+                f"[QUERY_CONTRIBUTOR] Emitting collapsible for model {model_id} with summary."
+            )
 
             await __event_emitter__(
                 {
@@ -639,7 +747,9 @@ class Pipe:
                     "data": {"content": collapsible_content},
                 }
             )
-            self.log_debug(f"[QUERY_CONTRIBUTOR] Emitted collapsible for model {model_id}.")
+            self.log_debug(
+                f"[QUERY_CONTRIBUTOR] Emitted collapsible for model {model_id}."
+            )
             return {"model": model_id, "output": collected_output}
 
         except Exception as e:
@@ -670,14 +780,8 @@ class Pipe:
         payload = {
             "model": summary_model_id,
             "messages": [
-                {
-                    "role": "system",
-                    "content": summary_system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": summary_user_prompt
-                }
+                {"role": "system", "content": summary_system_prompt},
+                {"role": "user", "content": summary_user_prompt},
             ],
             "stream": False,  # Summary generation does not need streaming
         }
@@ -693,16 +797,22 @@ class Pipe:
                     self.log_debug(f"[GENERATE_SUMMARY] Generated summary: {summary}")
                     return summary  # Return only the summary, without the model name
                 except (KeyError, IndexError) as e:
-                    self.log_debug(f"[GENERATE_SUMMARY] Missing 'content' in summary response: {e}")
-                    return "No summary available."
+                    self.log_debug(
+                        f"[GENERATE_SUMMARY] Missing 'content' in summary response: {e}"
+                    )
+                    return "Click to expand."
             else:
-                self.log_debug(f"[GENERATE_SUMMARY] Unexpected response type: {type(response)}")
-                return "No summary available."
+                self.log_debug(
+                    f"[GENERATE_SUMMARY] Unexpected response type: {type(response)}"
+                )
+                return "Click to expand."
         except Exception as e:
             self.log_debug(f"[GENERATE_SUMMARY] Error generating summary: {e}")
-            return "No summary available."
+            return "Click to expand."
 
-    async def handle_json_response(self, response: Union[JSONResponse, bytes, str]) -> dict:
+    async def handle_json_response(
+        self, response: Union[JSONResponse, bytes, str]
+    ) -> dict:
         """
         Handle and parse a JSON response from a JSONResponse object or raw content.
 
@@ -741,7 +851,9 @@ class Pipe:
         try:
             # Parse the JSON content
             response_data = json.loads(decoded_body)
-            self.log_debug(f"[HANDLE_JSON_RESPONSE] Parsed response data: {response_data}")
+            self.log_debug(
+                f"[HANDLE_JSON_RESPONSE] Parsed response data: {response_data}"
+            )
             return response_data
         except json.JSONDecodeError as e:
             self.log_debug(
@@ -768,15 +880,21 @@ class Pipe:
                     try:
                         chunk_str = chunk.decode("utf-8")
                     except UnicodeDecodeError as e:
-                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Chunk decode error: {e}")
+                        self.log_debug(
+                            f"[HANDLE_STREAMING_RESPONSE] Chunk decode error: {e}"
+                        )
                         continue
                 elif isinstance(chunk, str):
                     chunk_str = chunk
                 else:
-                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected chunk type: {type(chunk)}")
+                    self.log_debug(
+                        f"[HANDLE_STREAMING_RESPONSE] Unexpected chunk type: {type(chunk)}"
+                    )
                     continue
 
-                self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Received chunk: {chunk_str}")
+                self.log_debug(
+                    f"[HANDLE_STREAMING_RESPONSE] Received chunk: {chunk_str}"
+                )
 
                 # Strip 'data: ' prefix if present
                 if chunk_str.startswith("data: "):
@@ -784,12 +902,16 @@ class Pipe:
 
                 # End the stream if '[DONE]' signal is received
                 if chunk_str.strip() == "[DONE]":
-                    self.log_debug("[HANDLE_STREAMING_RESPONSE] Received [DONE] signal. Ending stream.")
+                    self.log_debug(
+                        "[HANDLE_STREAMING_RESPONSE] Received [DONE] signal. Ending stream."
+                    )
                     break
 
                 # Skip empty chunks
                 if not chunk_str.strip():
-                    self.log_debug("[HANDLE_STREAMING_RESPONSE] Empty chunk received. Skipping.")
+                    self.log_debug(
+                        "[HANDLE_STREAMING_RESPONSE] Empty chunk received. Skipping."
+                    )
                     continue
 
                 # Parse JSON content
@@ -806,21 +928,31 @@ class Pipe:
                     # Append valid content to the collected output
                     if message_content:
                         collected_output += message_content
-                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}")
+                        self.log_debug(
+                            f"[HANDLE_STREAMING_RESPONSE] Accumulated content: {message_content}"
+                        )
                     else:
-                        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}")
+                        self.log_debug(
+                            f"[HANDLE_STREAMING_RESPONSE] No content found in chunk: {chunk_str}"
+                        )
 
                 except json.JSONDecodeError as e:
-                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] JSON decoding error: {e} for chunk: {chunk_str}")
+                    self.log_debug(
+                        f"[HANDLE_STREAMING_RESPONSE] JSON decoding error: {e} for chunk: {chunk_str}"
+                    )
                     # Append the raw chunk to collected_output if it isn't JSON
-                    collected_output += f"[Unparsed Chunk]: {chunk_str}\n"
+                    # collected_output += f"[Unparsed Chunk]: {chunk_str}\n"
                 except Exception as e:
-                    self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Error processing JSON chunk: {e}")
+                    self.log_debug(
+                        f"[HANDLE_STREAMING_RESPONSE] Error processing JSON chunk: {e}"
+                    )
 
             except Exception as e:
                 self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Unexpected error: {e}")
 
-        self.log_debug(f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output}")
+        self.log_debug(
+            f"[HANDLE_STREAMING_RESPONSE] Final collected output: {collected_output}"
+        )
         return collected_output  # do not .strip()
 
     def ensure_newlines(self, content: str) -> str:
@@ -835,6 +967,43 @@ class Pipe:
         """
         # Replace multiple spaces with a single space and ensure proper line breaks
         return "\n".join(line.strip() for line in content.splitlines() if line.strip())
+
+    async def generate_consensus_moa(self, __event_emitter__, model_id):
+        """
+        Args:
+            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+        """
+        try:
+            payload = {
+                "model": model_id,
+                "prompt": "Summarize the outputs below into a single response:",
+                "responses": [output for _, output in self.model_outputs.items()],
+                "stream": False,
+            }
+            self.log_debug(f"[USE_MOA_RESPONSE] Fallback payload: {payload}")
+
+            # Call the generate_moa_response function
+            response = await generate_moa_response(form_data=payload, user=mock_user)
+
+            # Handle the response format
+            if hasattr(response, "json"):
+                response_data = await response.json()
+            else:
+                response_data = response  # Assume it's already a dict
+
+            consensus_response = response["choices"][0]["message"]["content"]
+            self.log_debug(f"[USE_MOA_RESPONSE] Consensus output: {consensus_response}")
+            await self.emit_output(
+                __event_emitter__, consensus_response, include_collapsible=False
+            )
+        except Exception as e:
+            self.log_debug(f"[USE_MOA_RESPONSE] Error synthesizing response: {e}")
+            await self.emit_status(
+                __event_emitter__,
+                "Error",
+                f"Fallback consensus generation failed: {str(e)}",
+                done=True,
+            )
 
     async def generate_consensus(self, __event_emitter__, consensus_model_id: str):
         """
@@ -863,8 +1032,12 @@ class Pipe:
 
         # Get the user's original query
         original_query = next(
-            (message["content"] for message in self.messages if message["role"] == "user"),
-            "No user query provided."
+            (
+                message["content"]
+                for message in self.messages
+                if message["role"] == "user"
+            ),
+            "No user query provided.",
         )
 
         # Prepare a clear delineation of outputs with model names
@@ -891,7 +1064,9 @@ class Pipe:
         }
 
         try:
-            self.log_debug(f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}")
+            self.log_debug(
+                f"[GENERATE_CONSENSUS] Payload for consensus model: {payload}"
+            )
 
             # Call the consensus generation function directly
             consensus_response = await generate_chat_completions(
@@ -900,10 +1075,16 @@ class Pipe:
 
             # Handle based on response type
             if isinstance(consensus_response, dict):
-                self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
+                self.log_debug(
+                    f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}"
+                )
                 try:
-                    self.consensus_output = consensus_response["choices"][0]["message"]["content"]
-                    self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
+                    self.consensus_output = consensus_response["choices"][0]["message"][
+                        "content"
+                    ]
+                    self.consensus_output = self.ensure_newlines(
+                        self.consensus_output
+                    )  # Ensure newlines
                     await self.emit_output(
                         __event_emitter__,
                         self.consensus_output,
@@ -912,7 +1093,9 @@ class Pipe:
                     await self.emit_status(__event_emitter__, "Completed", done=True)
                 except (KeyError, IndexError) as e:
                     error_detail = consensus_response.get("detail", str(e))
-                    self.log_debug(f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}")
+                    self.log_debug(
+                        f"[GENERATE_CONSENSUS] Consensus response missing key: {error_detail}"
+                    )
                     await self.emit_status(
                         __event_emitter__,
                         "Error",
@@ -923,8 +1106,12 @@ class Pipe:
             elif isinstance(consensus_response, StreamingResponse):
                 self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
                 self.consensus_streamed = True  # Set the flag to indicate streaming
-                self.consensus_output = await self.handle_streaming_response(consensus_response)
-                self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
+                self.consensus_output = await self.handle_streaming_response(
+                    consensus_response
+                )
+                self.consensus_output = self.ensure_newlines(
+                    self.consensus_output
+                )  # Ensure newlines
                 await self.emit_output(
                     __event_emitter__,
                     self.consensus_output,
@@ -933,7 +1120,9 @@ class Pipe:
                 await self.emit_status(__event_emitter__, "Completed", done=True)
 
             else:
-                self.log_debug(f"[GENERATE_CONSENSUS] Unexpected response type: {type(consensus_response)}")
+                self.log_debug(
+                    f"[GENERATE_CONSENSUS] Unexpected response type: {type(consensus_response)}"
+                )
                 await self.emit_status(
                     __event_emitter__,
                     "Error",
@@ -1015,8 +1204,12 @@ class Pipe:
 
         # Verify __event_emitter__ is callable
         if not callable(__event_emitter__):
-            self.log_debug(f"[EMIT_STATUS] __event_emitter__ is not callable: {type(__event_emitter__)}")
-            raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+            self.log_debug(
+                f"[EMIT_STATUS] __event_emitter__ is not callable: {type(__event_emitter__)}"
+            )
+            raise TypeError(
+                f"__event_emitter__ must be callable, got {type(__event_emitter__)}"
+            )
 
         try:
             await __event_emitter__(event)
@@ -1058,8 +1251,12 @@ class Pipe:
 
         # Verify __event_emitter__ is callable
         if not callable(__event_emitter__):
-            self.log_debug(f"[EMIT_COLLAPSIBLE] __event_emitter__ is not callable: {type(__event_emitter__)}")
-            raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+            self.log_debug(
+                f"[EMIT_COLLAPSIBLE] __event_emitter__ is not callable: {type(__event_emitter__)}"
+            )
+            raise TypeError(
+                f"__event_emitter__ must be callable, got {type(__event_emitter__)}"
+            )
 
         try:
             await __event_emitter__(message_event)
@@ -1081,11 +1278,17 @@ class Pipe:
         if __event_emitter__ and content:
             # Verify __event_emitter__ is callable
             if not callable(__event_emitter__):
-                self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
-                raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+                self.log_debug(
+                    f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}"
+                )
+                raise TypeError(
+                    f"__event_emitter__ must be callable, got {type(__event_emitter__)}"
+                )
 
             # Clean the main content by removing only newline characters
-            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
+            content_cleaned = content.replace(
+                "\n", ""
+            )  # ADJUSTED: Removes only newline characters
             self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
 
             # Prepare the message event
@@ -1133,7 +1336,9 @@ class Pipe:
         """
         # STRIP_OPERATION: Removes <details> tags and their contents using regex
         details_pattern = r"<details>\s*<summary>.*?</summary>\s*.*?</details>"
-        return re.sub(details_pattern, "", content, flags=re.DOTALL | re.IGNORECASE)  # ADJUSTED: Added re.IGNORECASE
+        return re.sub(
+            details_pattern, "", content, flags=re.DOTALL | re.IGNORECASE
+        )  # ADJUSTED: Added re.IGNORECASE
 
     def format_elapsed_time(self, elapsed: float) -> str:
         """
@@ -1260,7 +1465,8 @@ class Pipe:
                     "content": (
                         self.clean_message_content(message.get("content", ""))
                         if self.valves.strip_collapsible_tags
-                        and message["role"] == "assistant"  # STRIP_OPERATION: Conditional stripping
+                        and message["role"]
+                        == "assistant"  # STRIP_OPERATION: Conditional stripping
                         else message.get("content", "")
                     ),
                 }
@@ -1341,7 +1547,9 @@ class Pipe:
                                 )
                                 self.interrupted_contributors.add(model_id)
                                 # Attempt to select a replacement model
-                                replacement_model = await self.select_replacement_model(model_id, failed_models)
+                                replacement_model = await self.select_replacement_model(
+                                    model_id, failed_models
+                                )
                                 if replacement_model:
                                     new_remaining_models.append(replacement_model)
                                     self.log_debug(
@@ -1392,16 +1600,15 @@ class Pipe:
             )
 
             # Step 8: Generate Consensus
-            consensus_model_id = (
-                self.valves.consensus_model_id
-                if self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER
-                else body.get("model")
-            )
-            if not consensus_model_id:
-                raise ValueError("[PIPE] No valid consensus model ID provided.")
-
-            self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
-            await self.generate_consensus(__event_emitter__, consensus_model_id)
+            consensus_model_id = self.valves.consensus_model_id
+            if self.valves.consensus_model_id != CONSENSUS_PLACEHOLDER:
+                self.log_debug(f"[PIPE] Using consensus model ID: {consensus_model_id}")
+                await self.generate_consensus(__event_emitter__, consensus_model_id)
+            else:
+                self.log_debug(
+                    f"[PIPE] Placeholder for consensus_model_id detected, using built-in moa for aggregation"
+                )
+                await self.generate_consensus_moa(__event_emitter__, body["model"])
 
             # Step 9: Emit Consensus Completion Status
             consensus_time = time.time() - self.start_time
@@ -1443,7 +1650,9 @@ class Pipe:
                 )
             return {"status": "error", "message": str(e)}
 
-    async def select_replacement_model(self, failed_model_id: str, failed_models: set) -> Optional[Dict[str, str]]:
+    async def select_replacement_model(
+        self, failed_model_id: str, failed_models: set
+    ) -> Optional[Dict[str, str]]:
         """
         Select a replacement model that hasn't been failed yet.
 
@@ -1454,35 +1663,55 @@ class Pipe:
         Returns:
             Optional[Dict[str, str]]: The replacement model dictionary or None if no replacement is available.
         """
-        self.log_debug(f"[SELECT_REPLACEMENT] Selecting replacement for failed model {failed_model_id}.")
+        self.log_debug(
+            f"[SELECT_REPLACEMENT] Selecting replacement for failed model {failed_model_id}."
+        )
         try:
             # Fetch available contributing models again
             available_models_response = await get_models(user=mock_user)
 
             # Extract the list of models from the "data" key
-            if isinstance(available_models_response, dict) and "data" in available_models_response:
+            if (
+                isinstance(available_models_response, dict)
+                and "data" in available_models_response
+            ):
                 available_models = available_models_response["data"]
             else:
-                self.log_debug("[SELECT_REPLACEMENT] Invalid response structure from get_models.")
+                self.log_debug(
+                    "[SELECT_REPLACEMENT] Invalid response structure from get_models."
+                )
                 return None
 
             # Extract model IDs
             model_ids = [model["id"] for model in available_models if "id" in model]
 
             # Exclude already failed models and interrupted models
-            excluded_models = failed_models.union(self.interrupted_contributors).union({failed_model_id})
-            eligible_models = [model_id for model_id in model_ids if model_id not in excluded_models]
+            excluded_models = failed_models.union(self.interrupted_contributors).union(
+                {failed_model_id}
+            )
+            eligible_models = [
+                model_id for model_id in model_ids if model_id not in excluded_models
+            ]
 
             if not eligible_models:
-                self.log_debug("[SELECT_REPLACEMENT] No eligible models available for replacement.")
+                self.log_debug(
+                    "[SELECT_REPLACEMENT] No eligible models available for replacement."
+                )
                 return None
 
             # Select a random eligible model
             replacement_model_id = random.choice(eligible_models)
-            self.log_debug(f"[SELECT_REPLACEMENT] Selected replacement model: {replacement_model_id}")
+            self.log_debug(
+                f"[SELECT_REPLACEMENT] Selected replacement model: {replacement_model_id}"
+            )
 
-            return {"id": replacement_model_id, "name": f"random-{replacement_model_id}"}
+            return {
+                "id": replacement_model_id,
+                "name": f"random-{replacement_model_id}",
+            }
 
         except Exception as e:
-            self.log_debug(f"[SELECT_REPLACEMENT] Error selecting replacement model: {e}")
+            self.log_debug(
+                f"[SELECT_REPLACEMENT] Error selecting replacement model: {e}"
+            )
             return None
