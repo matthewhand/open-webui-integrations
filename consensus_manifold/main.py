@@ -1,9 +1,11 @@
 """
 
 title: Open-WebUI Consensus Manifold
-version: 0.2.1
+version: 0.2.3
 
 - [x] Fixed manifold prefix 'consensus/' instead of 'Consensus/'
+- [x] Streamed output when using explicit consensus_model_id
+- [x] Limit random model selection, but not tagged or explicit
 
 """
 
@@ -355,10 +357,16 @@ class Pipe:
             if not available_models:
                 raise ValueError("[FETCH_CONTRIBUTORS] No models available after filtering.")
 
-            # Select a random subset of models
-            num_models_to_select = min(self.valves.random_contributing_models_number, len(available_models))
-            selected_model_ids = random.sample([model["id"] for model in available_models], num_models_to_select)
-            self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models: {selected_model_ids}")
+            # Conditional selection based on the current mode
+            if self.current_mode == "random":
+                # Apply the random_contributing_models_number limit only in random mode
+                num_models_to_select = min(self.valves.random_contributing_models_number, len(available_models))
+                selected_model_ids = random.sample([model["id"] for model in available_models], num_models_to_select)
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models (Random Mode): {selected_model_ids}")
+            else:
+                # For 'explicit' and 'tags' modes, select all available models
+                selected_model_ids = [model["id"] for model in available_models]
+                self.log_debug(f"[FETCH_CONTRIBUTORS] Final selected models (Non-Random Mode): {selected_model_ids}")
 
             return selected_model_ids
 
@@ -464,7 +472,7 @@ class Pipe:
 
                 # Create a list of model dictionaries with 'id' and 'name'
                 selected_models = [
-                    {"id": model_id, "name": f"Random - {model_name_lookup.get(model_id, model_id)}"}
+                    {"id": model_id, "name": f"{model_name_lookup.get(model_id, model_id)}"}
                     for model_id in selected_model_ids
                 ]
 
@@ -483,7 +491,7 @@ class Pipe:
                 raise ValueError("[DETERMINE_CONTRIBUTORS] No explicit contributing models configured.")
 
             models = [
-                {"id": model, "name": f"Explicit - {model_name_lookup.get(model, model)}"}
+                {"id": model, "name": f"{model_name_lookup.get(model, model)}"}
                 for model in self.valves.explicit_contributing_models
             ]
 
@@ -951,7 +959,7 @@ class Pipe:
                 self.log_debug(f"[GENERATE_CONSENSUS] Response as dict: {consensus_response}")
                 try:
                     self.consensus_output = consensus_response["choices"][0]["message"]["content"]
-                    self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
+                    # Directly emit the content as is, no trimming or stripping
                     await self.emit_output(
                         __event_emitter__,
                         self.consensus_output,
@@ -971,13 +979,67 @@ class Pipe:
             elif isinstance(consensus_response, StreamingResponse):
                 self.log_debug("[GENERATE_CONSENSUS] Handling StreamingResponse")
                 self.consensus_streamed = True  # Set the flag to indicate streaming
-                self.consensus_output = await self.handle_streaming_response(consensus_response)
-                self.consensus_output = self.ensure_newlines(self.consensus_output)  # Ensure newlines
-                await self.emit_output(
-                    __event_emitter__,
-                    self.consensus_output,
-                    include_collapsible=False,  # Do not emit collapsibles here
-                )
+
+                # Process the streaming response and emit tokens as they are received
+                async for chunk in consensus_response.body_iterator:
+                    try:
+                        # Decode chunk to string if it's bytes
+                        if isinstance(chunk, bytes):
+                            try:
+                                chunk_str = chunk.decode("utf-8")
+                            except UnicodeDecodeError as e:
+                                self.log_debug(f"[GENERATE_CONSENSUS] Chunk decode error: {e}")
+                                continue
+                        elif isinstance(chunk, str):
+                            chunk_str = chunk
+                        else:
+                            self.log_debug(f"[GENERATE_CONSENSUS] Unexpected chunk type: {type(chunk)}")
+                            continue
+
+                        self.log_debug(f"[GENERATE_CONSENSUS] Received chunk: {chunk_str}")
+
+                        # Strip 'data: ' prefix if present
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[6:]
+
+                        # End the stream if '[DONE]' signal is received
+                        if chunk_str.strip() == "[DONE]":
+                            self.log_debug("[GENERATE_CONSENSUS] Received [DONE] signal. Ending stream.")
+                            break
+
+                        # Skip empty chunks
+                        if not chunk_str.strip():
+                            self.log_debug("[GENERATE_CONSENSUS] Empty chunk received. Skipping.")
+                            continue
+
+                        # Parse JSON content
+                        try:
+                            data = json.loads(chunk_str)
+                            choice = data.get("choices", [{}])[0]
+                            delta_content = choice.get("delta", {}).get("content", "")
+
+                            # Emit the delta content as it is received
+                            if delta_content:
+                                self.consensus_output = (self.consensus_output or '') + delta_content
+                                # Prepare the message event
+                                message_event = {
+                                    "type": "message",
+                                    "data": {"content": delta_content},
+                                }
+                                # Emit the token
+                                await __event_emitter__(message_event)
+                                self.log_debug(f"[GENERATE_CONSENSUS] Emitted token: {delta_content}")
+                            else:
+                                self.log_debug(f"[GENERATE_CONSENSUS] No content found in chunk: {chunk_str}")
+
+                        except json.JSONDecodeError as e:
+                            self.log_debug(f"[GENERATE_CONSENSUS] JSON decoding error: {e} for chunk: {chunk_str}")
+                        except Exception as e:
+                            self.log_debug(f"[GENERATE_CONSENSUS] Error processing JSON chunk: {e}")
+
+                    except Exception as e:
+                        self.log_debug(f"[GENERATE_CONSENSUS] Unexpected error: {e}")
+
                 await self.emit_status(__event_emitter__, "Completed", done=True)
 
             else:
