@@ -1,5 +1,8 @@
 """
 
+title: Open-WebUI Consensus Manifold
+version: 0.2.1
+
 - [x] Fixed manifold prefix 'consensus/' instead of 'Consensus/'
 
 """
@@ -692,7 +695,7 @@ class Pipe:
 
             if isinstance(response, dict):
                 try:
-                    summary = response["choices"][0]["message"]["content"].strip()
+                    summary = response["choices"][0]["message"]["content"] # .strip()
                     self.log_debug(f"[GENERATE_SUMMARY] Generated summary: {summary}")
                     return summary  # Return only the summary, without the model name
                 except (KeyError, IndexError) as e:
@@ -1129,14 +1132,10 @@ class Pipe:
                 self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
                 raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
 
-            # Clean the main content by removing only newline characters
-            content_cleaned = content.replace("\n", "")  # ADJUSTED: Removes only newline characters
-            self.log_debug(f"[EMIT_OUTPUT] Cleaned content: {content_cleaned}")
-
             # Prepare the message event
             main_message_event = {
                 "type": "message",
-                "data": {"content": content_cleaned},
+                "data": {"content": content},
             }
 
             try:
