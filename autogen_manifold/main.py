@@ -1,7 +1,6 @@
 """
 DO NOT CHANGE THE FOLLOWING:
-old requirements: autogen-agentchat==0.4.0.dev8, asyncio, dataclasses, pydantic, fastapi, aiohttp, requests
-requirements: ag2,flaml[automl]
+requirements: ag2, flaml[automl]
 
 Code doesn't work for you? USE DOCKER!
 """
@@ -9,7 +8,6 @@ import asyncio
 import json
 import logging
 import html
-import random
 import uuid
 from dataclasses import dataclass
 from typing import (
@@ -69,8 +67,35 @@ mock_user = User(
     email="root@host.docker.internal",
 )
 
-# Define available functions for function calling through valves
-available_functions = []  # This will be populated dynamically from valves
+# --------------------- Global Function Definitions ---------------------
+
+# Define available functions for function calling
+available_functions = [
+    {
+        "name": "get_current_time",
+        "description": "Returns the current UTC time.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "echo",
+        "description": "Echoes the input message.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message to echo back.",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+    # Add more function definitions here as needed
+]
 
 # Function Implementations Mapping
 function_implementations: Dict[str, Callable[[Dict[str, Any]], str]] = {}
@@ -104,6 +129,8 @@ def echo(arguments: Dict[str, Any]) -> str:
 # Register Example Functions
 function_implementations["get_current_time"] = get_current_time
 function_implementations["echo"] = echo
+
+# --------------------- End of Global Function Definitions ---------------------
 
 
 class OpenWebUIChatCompletionClient(ChatCompletionClient):
@@ -194,22 +221,20 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
         prompt = self._combine_messages(messages)
         self.log_debug(f"Creating completion with prompt: {prompt}")
 
-        # Ensure no empty 'system' messages are included
+        # **Hard strip all 'system' messages entirely**
         filtered_messages = [
             {
                 "role": msg.role,
                 "content": msg.content
             }
             for msg in messages
-            if hasattr(msg, "role") and msg.content and msg.content.strip() != ""
+            if hasattr(msg, "role")
+            and msg.content
+            and msg.content.strip() != ""
+            and msg.role.lower().strip() != "system"  # Exclude 'system' messages
         ]
 
-        # Check if a non-empty 'system' message already exists
-        has_non_empty_system = any(
-            msg["role"] == "system" and msg["content"].strip() != ""
-            for msg in filtered_messages
-        )
-        self.log_debug(f"Has non-empty 'system' message: {has_non_empty_system}")
+        self.log_debug(f"Filtered messages (excluding 'system'): {filtered_messages}")
 
         payload = {
             "model": self.model,
@@ -286,10 +311,21 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
                     if isinstance(response, dict):
                         message = response.get("choices", [{}])[0].get("message", {})
                         content = message.get("content", "No response generated.")
+                        function_call = message.get("function_call", None)
+                        self.log_debug(f"Post-function call function_call: {function_call}")
                     elif hasattr(response, "content"):
                         content = response.content
+                        function_call = None
+                        self.log_debug("No function_call in post-function response.")
                     else:
                         content = "No response generated."
+                        function_call = None
+                        self.log_debug("Unknown response format after function execution.")
+
+                    # Prevent further function calls to avoid infinite loops
+                    if function_call:
+                        self.log_debug("Additional function_call detected post-execution. Halting to prevent loop.")
+                        content += "\n[Note]: Multiple function calls detected. Halting to prevent infinite loop."
 
             usage = RequestUsage(
                 prompt_tokens=0, completion_tokens=len(content.split())
@@ -305,15 +341,8 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
             return CreateResult(
                 finish_reason="stop", content=content, usage=usage, cached=False
             )
-
-        except Exception as e:
-            self.log_debug(f"Error generating completion: {e}")
-            return CreateResult(
-                finish_reason="error",
-                content=f"Error generating completion: {str(e)}",
-                usage=self._actual_usage,
-                cached=False,
-            )
+        except:
+            pass
 
     async def create_stream(
         self,
@@ -348,22 +377,20 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
         prompt = self._combine_messages(messages)
         self.log_debug(f"Creating streaming completion with prompt: {prompt}")
 
-        # Ensure no empty 'system' messages are included
+        # **Hard strip all 'system' messages entirely**
         filtered_messages = [
             {
                 "role": msg.role,
                 "content": msg.content
             }
             for msg in messages
-            if hasattr(msg, "role") and msg.content and msg.content.strip() != ""
+            if hasattr(msg, "role")
+            and msg.content
+            and msg.content.strip() != ""
+            and msg.role.lower().strip() != "system"  # Exclude 'system' messages
         ]
 
-        # Check if a non-empty 'system' message already exists
-        has_non_empty_system = any(
-            msg["role"] == "system" and msg["content"].strip() != ""
-            for msg in filtered_messages
-        )
-        self.log_debug(f"Has non-empty 'system' message: {has_non_empty_system}")
+        self.log_debug(f"Filtered messages (excluding 'system'): {filtered_messages}")
 
         payload = {
             "model": self.model,
@@ -404,7 +431,7 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
 
                             self.log_debug(f"Parsed message: role={role}, function_call={function_call}")
 
-                            if role == "system" and not message.get("content", "").strip():
+                            if role.lower().strip() == "system" and not message.get("content", "").strip():
                                 self.log_debug("Skipping empty 'system' message.")
                                 continue  # Skip empty 'system' messages
 
@@ -434,7 +461,7 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
                                     self.log_debug(
                                         f"Emitting function response: {function_response_str}"
                                     )
-                                    yield f"data: {function_response_str}\n\n"
+                                    yield f"Agent Output: {function_response_str}\n"
 
                                     # Continue the conversation with the function response
                                     updated_messages = [
@@ -444,16 +471,15 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
                                     # Update messages for continued conversation
                                     filtered_messages = updated_messages
 
-                                    # Optionally, send updated messages to continue the stream
-                                    # Here, we'll assume the framework handles the continuation
-
-                                    continue  # Skip yielding the original chunk
+                                    # Prevent further function calls to avoid infinite loops
+                                    self.log_debug("Preventing further function calls to avoid infinite loop.")
+                                    break  # Exit the streaming loop
 
                     except json.JSONDecodeError:
                         self.log_debug("JSON decode error for chunk: %s", chunk_str)
                         pass  # Not a JSON chunk, yield as is
 
-                    yield chunk_str
+                    yield f"Agent Output: {chunk_str}\n"
             else:
                 if isinstance(response, dict):
                     message = response.get("choices", [{}])[0].get("message", {})
@@ -462,79 +488,132 @@ class OpenWebUIChatCompletionClient(ChatCompletionClient):
 
                     self.log_debug(f"Parsed message: role={role}, content={content}")
 
-                    if role == "system" and not content.strip():
+                    if role.lower().strip() == "system" and not content.strip():
                         self.log_debug("Skipping empty 'system' message.")
                     else:
                         self.log_debug(f"Final content from non-streaming response: {content}")
-                        yield content
+                        yield f"Agent Output: {content}\n"
 
             self.log_debug("Function 'create_stream' completed successfully.")
 
         except Exception as e:
             self.log_debug(f"Error generating streaming completion: {e}")
-            yield f"Error generating streaming completion: {str(e)}"
+            yield f"Agent Output: Error generating streaming completion: {str(e)}\n"
 
-    def _execute_function(self, function_call: dict) -> dict:
+    def oai_messages_to_anthropic_messages(params: Dict[str, Any]) -> list[dict[str, Any]]:
+        """Convert messages from OAI format to Anthropic format.
+        We correct for any specific role orders and types, etc.
         """
-        Execute the function call based on the function name and arguments.
 
-        Args:
-            function_call (dict): The function call details.
+        # Track whether we have tools passed in. If not,  tool use / result messages should be converted to text messages.
+        # Anthropic requires a tools parameter with the tools listed, if there are other messages with tool use or tool results.
+        # This can occur when we don't need tool calling, such as for group chat speaker selection.
+        has_tools = "tools" in params
 
-        Returns:
-            dict: The function execution result.
-        """
-        self.log_debug(f"Function '_execute_function' started with function_call: {function_call}")
-        function_name = function_call.get("name", "unknown_function")
-        arguments = function_call.get("arguments", {})
+        # Convert messages to Anthropic compliant format
+        processed_messages = []
 
-        self.log_debug(
-            f"Executing function '{function_name}' with arguments: {arguments}"
-        )
+        # Used to interweave user messages to ensure user/assistant alternating
+        user_continue_message = {"content": "Please continue.", "role": "user"}
+        assistant_continue_message = {"content": "Please continue.", "role": "assistant"}
 
-        # Retrieve the function implementation from the mapping
-        function = function_implementations.get(function_name, None)
+        tool_use_messages = 0
+        tool_result_messages = 0
+        last_tool_use_index = -1
+        last_tool_result_index = -1
+        for message in params["messages"]:
+            if message["role"] == "system":
+                params["system"] = params.get("system", "") + ("\n" if "system" in params else "") + message["content"]
+            else:
+                # New messages will be added here, manage role alternations
+                expected_role = "user" if len(processed_messages) % 2 == 0 else "assistant"
 
-        if function:
-            try:
-                response = function(arguments)
-                self.log_debug(f"Function '{function_name}' executed successfully with response: {response}")
-            except Exception as e:
-                response = f"Error executing function '{function_name}': {str(e)}"
-                self.log_debug(response)
-        else:
-            response = f"Function '{function_name}' is not defined."
-            self.log_debug(response)
+                if "tool_calls" in message:
+                    # Map the tool call options to Anthropic's ToolUseBlock
+                    tool_uses = []
+                    tool_names = []
+                    for tool_call in message["tool_calls"]:
+                        tool_uses.append(
+                            ToolUseBlock(
+                                type="tool_use",
+                                id=tool_call["id"],
+                                name=tool_call["function"]["name"],
+                                input=json.loads(tool_call["function"]["arguments"]),
+                            )
+                        )
+                        if has_tools:
+                            tool_use_messages += 1
+                        tool_names.append(tool_call["function"]["name"])
 
-        self.log_debug("Function '_execute_function' completed.")
-        return {"name": function_name, "response": response}
+                    if expected_role == "user":
+                        # Insert an extra user message as we will append an assistant message
+                        processed_messages.append(user_continue_message)
 
-    def _combine_messages(self, messages: Sequence[LLMMessage]) -> str:
-        """
-        Combine LLMMessage instances into a single string prompt.
+                    if has_tools:
+                        processed_messages.append({"role": "assistant", "content": tool_uses})
+                        last_tool_use_index = len(processed_messages) - 1
+                    else:
+                        # Not using tools, so put in a plain text message
+                        processed_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": f"Some internal function(s) that could be used: [{', '.join(tool_names)}]",
+                            }
+                        )
+                elif "tool_call_id" in message:
+                    if has_tools:
+                        # Map the tool usage call to tool_result for Anthropic
+                        tool_result = {
+                            "type": "tool_result",
+                            "tool_use_id": message["tool_call_id"],
+                            "content": message["content"],
+                        }
 
-        Args:
-            messages (Sequence[LLMMessage]): The input messages.
+                        # If the previous message also had a tool_result, add it to that
+                        # Otherwise append a new message
+                        if last_tool_result_index == len(processed_messages) - 1:
+                            processed_messages[-1]["content"].append(tool_result)
+                        else:
+                            if expected_role == "assistant":
+                                # Insert an extra assistant message as we will append a user message
+                                processed_messages.append(assistant_continue_message)
 
-        Returns:
-            str: The combined prompt string.
-        """
-        self.log_debug("Function '_combine_messages' started with messages: %s", messages)
-        combined = "\n".join(
-            f"{msg.role}: {msg.content}"
-            for msg in messages
-            if hasattr(msg, "role") and msg.content and msg.content.strip() != ""
-        )
-        self.log_debug(f"Combined messages into prompt: {combined}")
-        self.log_debug("Function '_combine_messages' completed.")
-        return combined
+                            processed_messages.append({"role": "user", "content": [tool_result]})
+                            last_tool_result_index = len(processed_messages) - 1
 
-    def reset(self):
-        """Reset usage statistics."""
-        self.log_debug("Function 'reset' started.")
-        self._actual_usage = RequestUsage(prompt_tokens=0, completion_tokens=0)
-        self.log_debug("Usage statistics reset.")
-        self.log_debug("Function 'reset' completed.")
+                        tool_result_messages += 1
+                    else:
+                        # Not using tools, so put in a plain text message
+                        processed_messages.append(
+                            {"role": "user", "content": f"Running the function returned: {message['content']}"}
+                        )
+                elif message["content"] == "":
+                    # Ignoring empty messages
+                    pass
+                else:
+                    if expected_role != message["role"]:
+                        # Inserting the alternating continue message
+                        processed_messages.append(
+                            user_continue_message if expected_role == "user" else assistant_continue_message
+                        )
+
+                    processed_messages.append(message)
+
+        # We'll replace the last tool_use if there's no tool_result (occurs if we finish the conversation before running the function)
+        if has_tools and tool_use_messages != tool_result_messages:
+            processed_messages[last_tool_use_index] = assistant_continue_message
+
+        # name is not a valid field on messages
+        for message in processed_messages:
+            if "name" in message:
+                message.pop("name", None)
+
+        # Note: When using reflection_with_llm we may end up with an "assistant" message as the last message and that may cause a blank response
+        # So, if the last role is not user, add a 'user' continue message at the end
+        if processed_messages and processed_messages[-1]["role"] != "user":
+            processed_messages.append(user_continue_message)
+
+        return processed_messages
 
 
 class Pipe:
@@ -554,43 +633,6 @@ class Pipe:
         enable_captain_agent: bool = Field(
             default=True, description="Enable CaptainAgent functionality."
         )
-        function_definitions: list = Field(
-            default=[
-                {
-                    "name": "get_current_time",
-                    "description": "Returns the current UTC time.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                        "required": [],
-                    },
-                },
-                {
-                    "name": "echo",
-                    "description": "Echoes the input message.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "The message to echo back.",
-                            },
-                        },
-                        "required": ["message"],
-                    },
-                },
-                # Add more function definitions here
-            ],
-            description="List of function definitions.",
-        )
-        function_implementations: Dict[str, Callable[[Dict[str, Any]], str]] = Field(
-            default_factory=lambda: {
-                "get_current_time": get_current_time,
-                "echo": echo,
-                # Add more function implementations here
-            },
-            description="Mapping of function names to their implementations.",
-        )
         debug_valve: bool = Field(default=True, description="Enable debug logging.")
 
     def __init__(self, endpoint: Optional[str] = None):
@@ -599,11 +641,6 @@ class Pipe:
         if endpoint:
             self.valves.default_model_id = endpoint
             self.log_debug(f"Overriding default_model_id with endpoint: {endpoint}")
-
-        # Initialize global function mappings
-        global available_functions, function_implementations
-        available_functions = self.valves.function_definitions
-        function_implementations = self.valves.function_implementations
 
         # Initialize logging
         self.log = logging.getLogger(self.__class__.__name__)
@@ -645,8 +682,8 @@ class Pipe:
 
         # Define the custom model client configuration
         model_config = {
-            "model": self.valves.default_model_id,  # Use default_model_id from valves
-            "functions": available_functions,
+            "model": self.valves.default_model_id,        # Use default_model_id from valves
+            "functions": available_functions,              # Use global available_functions
             "debug_valve": self.valves.debug_valve,
         }
 
@@ -775,7 +812,7 @@ class Pipe:
                         sender=sender,
                         message=message
                     )
-                    self.log.debug(f"[PIPE] Emitting collapsible content: {collapsible_content}")
+                    self.log_debug(f"[PIPE] Emitting collapsible content: {collapsible_content}")
                     await __event_emitter__(
                         {
                             "type": "message",
@@ -854,56 +891,481 @@ class Pipe:
             message (str): The content of the message.
 
         Returns:
-            str: Collapsible HTML content.
+            str: Collapsible HTML content prefixed with 'Agent Output: '.
         """
         self.log_debug("Function '_generate_collapsible_ui' started with sender: %s, message: %s", sender, message)
         summary = f"{sender} says: {html.escape(message[:50])}..." if len(message) > 50 else f"{sender} says: {html.escape(message)}"
         collapsible_content = f"""
         <details>
             <summary>{summary}</summary>
-            <p>{html.escape(message)}</p>
+            Agent Output: {html.escape(message)}
         </details>
         """
         self.log_debug(f"Generated collapsible UI: {collapsible_content.strip()}")
         self.log_debug("Function '_generate_collapsible_ui' completed.")
         return collapsible_content.strip()
 
-    # Mock event emitter for testing
-    @staticmethod
-    async def mock_event_emitter(event: Dict[str, Any]):
-        print(f"Emitted Event: {json.dumps(event, indent=2)}")
+    # --------------------- End of Pipe Class ---------------------
 
-    # Example Runner (Optional)
-    # Uncomment to test the Pipe class independently.
+# --------------------- OpenWebUIChatCompletionClient ---------------------
 
-    # async def run_pipe_example():
-    #     pipe = Pipe()
-    #     body = {
-    #         "messages": [
-    #             {"role": "user", "content": "Explain how AI can improve education."}
-    #         ]
-    #     }
-    #     print(pipe.valves.default_model_id)  # Should print the default model ID
-    #     await pipe.pipe(body=body, __event_emitter__=Pipe.mock_event_emitter)
+class OpenWebUIChatCompletionClient(ChatCompletionClient):
+    """
+    A custom chat completion client that interfaces with Open WebUI's generate_chat_completions.
+    """
 
-    # def execute_run_pipe():
-    #     logging.debug("Function 'execute_run_pipe' started.")
-    #     try:
-    #         asyncio.run(run_pipe_example())
-    #         logging.debug("Asyncio run completed successfully.")
-    #     except RuntimeError as e:
-    #         if "asyncio.run() cannot be called from a running event loop" in str(e):
-    #             loop = asyncio.get_event_loop()
-    #             if loop and loop.is_running():
-    #                 logging.debug("Event loop already running. Creating a task for 'run_pipe_example'.")
-    #                 task = loop.create_task(run_pipe_example())
-    #             else:
-    #                 logging.debug("Event loop not running. Re-raising the exception.")
-    #                 raise
-    #         else:
-    #             logging.debug("RuntimeError encountered: %s", e)
-    #             raise
-    #     logging.debug("Function 'execute_run_pipe' completed.")
+    def __init__(self, model: str, functions: Optional[list] = None, **kwargs):
+        """
+        Initialize the client with the specified model and any additional parameters.
 
-    # # Uncomment the following line to execute the pipe when this script is run directly
-    # # execute_run_pipe()
+        Args:
+            model (str): The model name to use for generating completions.
+            functions (Optional[list]): A list of function definitions.
+            **kwargs: Additional keyword arguments for configuration.
+        """
+        logging.debug(
+            "Initializing OpenWebUIChatCompletionClient with model: %s, functions: %s, kwargs: %s",
+            model,
+            functions,
+            kwargs,
+        )
+        self.model = model
+        self.functions = functions or []
+        self.config = kwargs
+        # Function calling is always enabled
+        self._model_capabilities = ModelCapabilities(
+            vision=False, function_calling=True, json_output=True
+        )
+        self._total_usage = RequestUsage(prompt_tokens=0, completion_tokens=0)
+        self._actual_usage = RequestUsage(prompt_tokens=0, completion_tokens=0)
+
+        # Logging setup
+        self.log = logging.getLogger(self.__class__.__name__)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        if not self.log.handlers:
+            self.log.addHandler(handler)
+        self.log.setLevel(
+            logging.DEBUG if kwargs.get("debug_valve", True) else logging.INFO
+        )
+
+        self.log_debug("OpenWebUIChatCompletionClient initialized.")
+
+    def log_debug(self, message: str):
+        """Log debug messages."""
+        self.log.debug(message)
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        """Return the model's simulated capabilities."""
+        self.log_debug(f"Accessing capabilities: {self._model_capabilities}")
+        return self._model_capabilities
+
+    async def create(
+        self,
+        messages: Sequence[LLMMessage],
+        tools: Sequence[Any] = [],  # Adjust tool typing if necessary
+        json_output: Optional[bool] = None,
+        extra_create_args: Dict[str, Any] = {},
+        cancellation_token: Optional[Any] = None,  # Adjust typing based on actual token
+    ) -> CreateResult:
+        """
+        Generate a chat completion using Open WebUI's generate_chat_completions.
+
+        Args:
+            messages (Sequence[LLMMessage]): The input messages.
+            tools (Sequence[Any], optional): Tools to assist in completion. Defaults to [].
+            json_output (Optional[bool], optional): Whether to output in JSON format. Defaults to None.
+            extra_create_args (Dict[str, Any], optional): Additional arguments. Defaults to {}.
+            cancellation_token (Optional[Any], optional): Token to cancel the operation. Defaults to None.
+
+        Returns:
+            CreateResult: The result of the completion.
+        """
+        self.log_debug(
+            "Function 'create' started with messages: %s, tools: %s, json_output: %s, extra_create_args: %s, cancellation_token: %s",
+            messages,
+            tools,
+            json_output,
+            extra_create_args,
+            cancellation_token,
+        )
+
+        # **Check if messages are LLMMessage instances or dicts**
+        if all(isinstance(msg, LLMMessage) for msg in messages):
+            self.log_debug("All messages are instances of LLMMessage.")
+            message_roles = [msg.role.lower().strip() for msg in messages]
+            message_contents = [msg.content.strip() for msg in messages]
+        elif all(isinstance(msg, dict) for msg in messages):
+            self.log_debug("All messages are dictionaries.")
+            message_roles = [msg.get("role", "").lower().strip() for msg in messages]
+            message_contents = [msg.get("content", "").strip() for msg in messages]
+        else:
+            # Mixed types or unexpected types
+            self.log.error("Messages are of mixed or unexpected types.")
+            error_message = "Messages are of mixed or unexpected types."
+            return CreateResult(
+                finish_reason="error",
+                content=error_message,
+                usage=self._actual_usage,
+                cached=False,
+            )
+
+        # **Guard: Ensure all roles and contents are non-empty**
+        for idx, (role, content) in enumerate(zip(message_roles, message_contents)):
+            if not role:
+                error_message = f"[OpenWebUIChatCompletionClient] Message at index {idx} has an empty 'role'."
+                self.log.error(error_message)
+                return CreateResult(
+                    finish_reason="error",
+                    content=error_message,
+                    usage=self._actual_usage,
+                    cached=False,
+                )
+            if not content:
+                error_message = f"[OpenWebUIChatCompletionClient] Message at index {idx} has empty 'content'."
+                self.log.error(error_message)
+                return CreateResult(
+                    finish_reason="error",
+                    content=error_message,
+                    usage=self._actual_usage,
+                    cached=False,
+                )
+
+        # **Count the number of 'system' messages**
+        system_message_count = sum(1 for role in message_roles if role == "system")
+        self.log_debug(f"Number of 'system' messages: {system_message_count}")
+
+        # **If two or more 'system' messages exist, return immediately**
+        if system_message_count >= 2:
+            error_message = (
+                f"[OpenWebUIChatCompletionClient] Detected {system_message_count} 'system' messages. "
+                "Returning immediately to prevent infinite loop."
+            )
+            self.log.error(error_message)
+            return CreateResult(
+                finish_reason="error",
+                content=error_message,
+                usage=self._actual_usage,
+                cached=False,
+            )
+
+        # **Hard strip all 'system' messages entirely**
+        if all(isinstance(msg, LLMMessage) for msg in messages):
+            filtered_messages = [
+                {
+                    "role": msg.role,
+                    "content": msg.content
+                }
+                for msg in messages
+                if msg.role.lower().strip() != "system" and msg.content.strip() != ""
+            ]
+        else:  # messages are dicts
+            filtered_messages = [
+                {
+                    "role": msg.get("role", ""),
+                    "content": msg.get("content", "")
+                }
+                for msg in messages
+                if msg.get("role", "").lower().strip() != "system" and msg.get("content", "").strip() != ""
+            ]
+
+        self.log_debug(f"Filtered messages (excluding 'system'): {filtered_messages}")
+
+        # **Guard: Check if filtered_messages is not empty**
+        if not filtered_messages:
+            warning_message = "[OpenWebUIChatCompletionClient] No messages left after filtering out 'system' messages."
+            self.log.warning(warning_message)
+            return CreateResult(
+                finish_reason="error",
+                content=warning_message,
+                usage=self._actual_usage,
+                cached=False,
+            )
+
+        # **Serialize the filtered messages to a JSON string for regex checking**
+        try:
+            messages_str = json.dumps(filtered_messages)
+            self.log_debug(f"Serialized filtered messages: {messages_str}")
+        except Exception as e:
+            error_message = f"[OpenWebUIChatCompletionClient] Failed to serialize messages: {str(e)}"
+            self.log.error(error_message)
+            return CreateResult(
+                finish_reason="error",
+                content=error_message,
+                usage=self._actual_usage,
+                cached=False,
+            )
+
+        # **Use regex to check if 'system' appears more than once in the serialized messages**
+        system_role_matches = re.findall(r'"role"\s*:\s*"system"', messages_str, re.IGNORECASE)
+        system_role_count_regex = len(system_role_matches)
+        self.log_debug(f"Regex detected 'system' roles: {system_role_count_regex}")
+
+        if system_role_count_regex >= 1:
+            # This should not happen as we've already filtered out 'system' messages
+            error_message = (
+                f"[OpenWebUIChatCompletionClient] Regex detected {system_role_count_regex} 'system' roles in messages after filtering. "
+                "Returning immediately to prevent infinite loop."
+            )
+            self.log.error(error_message)
+            return CreateResult(
+                finish_reason="error",
+                content=error_message,
+                usage=self._actual_usage,
+                cached=False,
+            )
+
+        # **Combine messages into a prompt (optional, based on your implementation)**
+        if all(isinstance(msg, LLMMessage) for msg in messages):
+            prompt = self._combine_messages(filtered_messages)
+        else:
+            # If messages are dicts, convert them to LLMMessage instances for combining
+            try:
+                converted_messages = [LLMMessage(**msg) for msg in filtered_messages]
+                prompt = self._combine_messages(converted_messages)
+            except Exception as e:
+                error_message = f"[OpenWebUIChatCompletionClient] Failed to convert messages to LLMMessage: {str(e)}"
+                self.log.error(error_message)
+                return CreateResult(
+                    finish_reason="error",
+                    content=error_message,
+                    usage=self._actual_usage,
+                    cached=False,
+                )
+        self.log_debug(f"Creating completion with prompt: {prompt}")
+
+        payload = {
+            "model": self.model,
+            "messages": filtered_messages,
+            "functions": self.functions,  # Include functions in the payload
+            "stream": False,  # Set to False for simplicity
+            **extra_create_args,
+        }
+
+        self.log_debug(f"Payload sent to generate_chat_completions: {payload}")
+
+        try:
+            response = await generate_chat_completions(
+                form_data=payload, user=mock_user, bypass_filter=True
+            )
+            self.log_debug(f"Received response: {response}")
+            self.log_debug(f"Response type: {type(response)}")
+
+            # Handle response based on its type
+            if isinstance(response, dict):
+                message = response.get("choices", [{}])[0].get("message", {})
+                content = message.get("content", "No response generated.")
+                function_call = message.get("function_call", None)
+            elif hasattr(response, "content"):
+                content = response.content
+                function_call = None  # Assuming TextMessage doesn't support function_call
+            else:
+                content = "No response generated."
+                function_call = None
+
+            self.log_debug(f"Extracted content: {content}")
+            self.log_debug(f"Function call: {function_call}")
+
+            # **Guard: Ensure extracted content is not empty**
+            if not content.strip():
+                error_message = "[OpenWebUIChatCompletionClient] Extracted content is empty."
+                self.log.error(error_message)
+                return CreateResult(
+                    finish_reason="error",
+                    content=error_message,
+                    usage=self._actual_usage,
+                    cached=False,
+                )
+
+            # Check if function_call is present in the response
+            if function_call:
+                self.log_debug(f"Function call detected: {function_call}")
+                # Execute the function
+                mock_function_response = self._execute_function(function_call)
+                self.log_debug(f"Function executed: {mock_function_response}")
+
+                # **Guard: Ensure function response is not empty**
+                if not mock_function_response["response"].strip():
+                    error_message = f"[OpenWebUIChatCompletionClient] Function '{mock_function_response['name']}' returned empty response."
+                    self.log.error(error_message)
+                    return CreateResult(
+                        finish_reason="error",
+                        content=error_message,
+                        usage=self._actual_usage,
+                        cached=False,
+                    )
+
+                function_message = {
+                    "role": "function",
+                    "name": mock_function_response["name"],
+                    "content": mock_function_response["response"],
+                }
+
+                # Append the function response as a separate message
+                updated_messages = filtered_messages + [function_message]
+
+                self.log_debug(
+                    f"Updated messages with function response: {function_message}"
+                )
+
+                # **Guard: Ensure no 'system' messages are introduced**
+                system_in_updated = any(
+                    msg.get("role", "").lower().strip() == "system" for msg in updated_messages
+                )
+                if system_in_updated:
+                    error_message = (
+                        "[OpenWebUIChatCompletionClient] 'system' message detected after function execution. "
+                        "Halting to prevent infinite loop."
+                    )
+                    self.log.error(error_message)
+                    return CreateResult(
+                        finish_reason="error",
+                        content=error_message,
+                        usage=self._actual_usage,
+                        cached=False,
+                    )
+
+                # Make another call to generate_chat_completions with updated messages
+                response = await generate_chat_completions(
+                    form_data={
+                        "model": self.model,
+                        "messages": updated_messages,
+                        "functions": self.functions,
+                        "stream": False,
+                        **extra_create_args,
+                    },
+                    user=mock_user,
+                    bypass_filter=True,
+                )
+                self.log_debug(f"Received response after function execution: {response}")
+
+                # Extract content from the new response
+                if isinstance(response, dict):
+                    message = response.get("choices", [{}])[0].get("message", {})
+                    content = message.get("content", "No response generated.")
+                    function_call = message.get("function_call", None)
+                    self.log_debug(f"Post-function call function_call: {function_call}")
+                elif hasattr(response, "content"):
+                    content = response.content
+                    function_call = None
+                    self.log_debug("No function_call in post-function response.")
+                else:
+                    content = "No response generated."
+                    function_call = None
+                    self.log_debug("Unknown response format after function execution.")
+
+                # **Guard: Ensure extracted content is not empty after function execution**
+                if not content.strip():
+                    error_message = "[OpenWebUIChatCompletionClient] Extracted content after function execution is empty."
+                    self.log.error(error_message)
+                    return CreateResult(
+                        finish_reason="error",
+                        content=error_message,
+                        usage=self._actual_usage,
+                        cached=False,
+                    )
+
+                # Prevent further function calls to avoid infinite loops
+                if function_call:
+                    self.log_debug("Additional function_call detected post-execution. Halting to prevent loop.")
+                    content += "\n[Note]: Multiple function calls detected. Halting to prevent infinite loop."
+
+            usage = RequestUsage(
+                prompt_tokens=0, completion_tokens=len(content.split())
+            )
+            self._actual_usage = usage
+            self._total_usage.prompt_tokens += usage.prompt_tokens
+            self._total_usage.completion_tokens += usage.completion_tokens
+
+            self.log_debug(f"Usage updated: {usage}")
+            self.log_debug(f"Total usage: {self._total_usage}")
+
+            self.log_debug("Function 'create' completed successfully.")
+            return CreateResult(
+                finish_reason="stop", content=content, usage=usage, cached=False
+            )
+        except Exception as e:
+            self.log_debug(f"Error generating streaming completion: {e}")
+            yield f"Agent Output: Error generating streaming completion: {str(e)}\n"
+
+    def _execute_function(self, function_call: dict) -> dict:
+        """
+        Execute the function call based on the function name and arguments.
+
+        Args:
+            function_call (dict): The function call details.
+
+        Returns:
+            dict: The function execution result.
+        """
+        logging.debug(f"Function '_execute_function' started with function_call: {function_call}")
+        function_name = function_call.get("name", "unknown_function")
+        arguments = function_call.get("arguments", {})
+
+        logging.debug(
+            f"Executing function '{function_name}' with arguments: {arguments}"
+        )
+
+        # Retrieve the function implementation from the mapping
+        function = function_implementations.get(function_name, None)
+
+        if function:
+            try:
+                response = function(arguments)
+                logging.debug(f"Function '{function_name}' executed successfully with response: {response}")
+            except Exception as e:
+                response = f"Error executing function '{function_name}': {str(e)}"
+                logging.debug(response)
+        else:
+            response = f"Function '{function_name}' is not defined."
+            logging.debug(response)
+
+        logging.debug("Function '_execute_function' completed.")
+        return {"name": function_name, "response": response}
+
+    def _combine_messages(self, messages: Sequence[LLMMessage]) -> str:
+        """
+        Combine LLMMessage instances into a single string prompt.
+
+        Args:
+            messages (Sequence[LLMMessage]): The input messages.
+
+        Returns:
+            str: The combined prompt string.
+        """
+        logging.debug("Function '_combine_messages' started with messages: %s", messages)
+        combined = "\n".join(
+            f"{msg.role}: {msg.content}"
+            for msg in messages
+            if hasattr(msg, "role") and msg.content and msg.content.strip() != ""
+        )
+        logging.debug(f"Combined messages into prompt: {combined}")
+        logging.debug("Function '_combine_messages' completed.")
+        return combined
+
+    def _generate_collapsible_ui(self, sender: str, message: str) -> str:
+        """
+        Generates collapsible HTML UI for agent-to-agent communication.
+
+        Args:
+            sender (str): The sender of the message.
+            message (str): The content of the message.
+
+        Returns:
+            str: Collapsible HTML content prefixed with 'Agent Output: '.
+        """
+        self.log_debug("Function '_generate_collapsible_ui' started with sender: %s, message: %s", sender, message)
+        summary = f"{sender} says: {html.escape(message[:50])}..." if len(message) > 50 else f"{sender} says: {html.escape(message)}"
+        collapsible_content = f"""
+        <details>
+            <summary>{summary}</summary>
+            Agent Output: {html.escape(message)}
+        </details>
+        """
+        self.log_debug(f"Generated collapsible UI: {collapsible_content.strip()}")
+        self.log_debug("Function '_generate_collapsible_ui' completed.")
+        return collapsible_content.strip()
