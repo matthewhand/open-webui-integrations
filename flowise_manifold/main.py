@@ -51,7 +51,7 @@ mock_user = User(
 FLOWISE_API_ENDPOINT_PLACEHOLDER = "YOUR_FLOWISE_API_ENDPOINT"
 FLOWISE_API_KEY_PLACEHOLDER = "YOUR_FLOWISE_API_KEY"
 FLOWISE_CHATFLOW_IDS_PLACEHOLDER = "YOUR_FLOWISE_CHATFLOW_IDS"
-MANIFOLD_PREFIX_DEFAULT = "flowise/"
+MANIFOLD_PREFIX_DEFAULT = "flowise_manifold."
 
 class Pipe:
     """
@@ -884,6 +884,7 @@ if __name__ == "__main__":
         use_dynamic_chatflows=False,  # Dynamic chatflows disabled
         use_static_chatflows=True,
         flowise_chatflow_ids="owuiDocs:e208c6f0-24bc-45e3-b7cd-ee88df6096e1",
+        manifold_prefix="flowise_manifold.",  # Set to 'flowise_manifold.' as per requirement
         enable_debug=True
     )
 
@@ -891,7 +892,7 @@ if __name__ == "__main__":
 
     # Define the request body with a valid model
     body_valid = {
-        "model": "flowise/owuiDocs",
+        "model": "flowise_manifold.owuiDocs",
         "messages": [
             {"role": "user", "content": "hi"}
         ]
@@ -899,7 +900,7 @@ if __name__ == "__main__":
 
     # Define the request body with an invalid model
     body_invalid = {
-        "model": "invalidPrefix/unknownChatflow",
+        "model": "flowise_manifold.unknownChatflow",
         "messages": [
             {"role": "user", "content": "hi"}
         ]
@@ -907,12 +908,12 @@ if __name__ == "__main__":
 
     # Define the request body with no messages
     body_no_messages = {
-        "model": "flowise/owuiDocs",
+        "model": "flowise_manifold.owuiDocs",
         "messages": []
     }
 
     # Test with synchronous event emitter
-    print("\n--- Testing with Synchronous Event Emitter ---")
+    print("\n--- Testing with Synchronous Event Emitter (Valid Model) ---")
     response_sync = pipe.pipe(
         body=body_valid,
         __user__={"user_id": "default_user"},
@@ -921,7 +922,7 @@ if __name__ == "__main__":
     print("Pipe Response (Sync):", response_sync)
 
     # Test with asynchronous event emitter
-    print("\n--- Testing with Asynchronous Event Emitter ---")
+    print("\n--- Testing with Asynchronous Event Emitter (Valid Model) ---")
     async def test_async_emitter():
         response_async = pipe.pipe(
             body=body_valid,
