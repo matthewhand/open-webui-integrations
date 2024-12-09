@@ -1,6 +1,8 @@
 """
 TODO
 - [x] Static chatflow definitions
+- [ ] Determine which static flow is being used
+- [ ] Emit message back to user
 - [ ] Dynamic chatflow definitions
 
 """
@@ -14,7 +16,7 @@ from typing import List, Optional, Callable, Dict, Any, Union
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
 
-import requests  # Replaced aiohttp with requests for synchronous HTTP requests
+import requests  # Synchronous HTTP requests
 
 # Mock functions for demonstration (Replace with actual implementations)
 def generate_chat_completions(form_data):
@@ -228,10 +230,11 @@ class Pipe:
 
         # Load chatflows asynchronously during initialization
         try:
-            asyncio.create_task(self.load_chatflows(dynamic_ok, static_ok))
-            self.log_debug("[INIT] Scheduled chatflow loading task.")
+            # Since the Pipe class is synchronous, we load chatflows synchronously
+            self.load_chatflows(dynamic_ok, static_ok)
+            self.log_debug("[INIT] Loaded chatflows synchronously.")
         except Exception as e:
-            self.log_error(f"[INIT] Failed to schedule chatflow loading: {e}", exc_info=True)
+            self.log_error(f"[INIT] Failed to load chatflows: {e}", exc_info=True)
 
         self.log_debug("[INIT] Pipe initialization complete.")
 
@@ -650,15 +653,8 @@ class Pipe:
 
             # Emit the Flowise response via the event emitter
             if __event_emitter__:
-                response_event = {
-                    "type": "message",
-                    "data": {"content": text},
-                }
-                self.log_debug(f"[handle_flowise_request] Emitting Flowise response event: {response_event!r}")
-                try:
-                    self.emit_status_sync(__event_emitter__, response_event, done=False)
-                except Exception as e:
-                    self.log_error(f"[handle_flowise_request] Error emitting response event: {e}", exc_info=True)
+                self.log_debug(f"[handle_flowise_request] Emitting Flowise response via emit_output_sync.")
+                self.emit_output_sync(__event_emitter__, text, include_collapsible=False)
 
             return {"response": text}
 
@@ -672,6 +668,55 @@ class Pipe:
             return {"error": error_message}
         finally:
             self.log_debug("[handle_flowise_request] Finished handling Flowise request.")
+
+    def emit_status_sync(
+        self,
+        __event_emitter__: Callable[[dict], Any],
+        message: str,
+        done: bool,
+    ):
+        """Emit status updates to the event emitter synchronously."""
+        if __event_emitter__:
+            event = {
+                "type": "status",
+                "data": {"description": message, "done": done},
+            }
+            self.log_debug(f"Emitting status event: {event}")
+            try:
+                __event_emitter__(event)
+                self.log_debug("[emit_status_sync] Status event emitted successfully.")
+            except Exception as e:
+                self.log_error(f"[emit_status_sync] Error emitting status event: {e}", exc_info=True)
+            finally:
+                self.log_debug("[emit_status_sync] Finished emitting status event.")
+
+    def emit_output_sync(
+        self,
+        __event_emitter__: Callable[[dict], Any],
+        content: str,
+        include_collapsible: bool = False
+    ):
+        """Emit message updates to the event emitter synchronously."""
+        if __event_emitter__ and content:
+            # Verify __event_emitter__ is callable
+            if not callable(__event_emitter__):
+                self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
+                raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+
+            # Prepare the message event
+            message_event = {
+                "type": "message",
+                "data": {"content": content},
+            }
+
+            self.log_debug(f"[EMIT_OUTPUT] Emitting message event: {message_event}")
+            try:
+                __event_emitter__(message_event)
+                self.log_debug("[emit_output_sync] Message event emitted successfully.")
+            except Exception as e:
+                self.log_error(f"[emit_output_sync] Error emitting message event: {e}", exc_info=True)
+            finally:
+                self.log_debug("[emit_output_sync] Finished emitting message event.")
 
     def pipe(
         self,
@@ -691,7 +736,8 @@ class Pipe:
         6. Emit initial status: "Processing your request".
         7. Query the selected chatflow.
         8. Emit contribution completion status.
-        9. Return the Flowise output or an error message in a standardized format.
+        9. Emit final status with done=True.
+        10. Return the Flowise output or an error message in a standardized format.
 
         Args:
             body (dict): The incoming request payload.
@@ -774,7 +820,13 @@ class Pipe:
                 self.emit_status_sync(__event_emitter__, f"Contribution took {contribution_time_str}", done=False)
                 self.log_debug(f"[pipe] Emitted contribution completion status: Contribution took {contribution_time_str}")
 
-            # Step 7: Return the Flowise output
+            # Step 7: Emit final status with done=True
+            if __event_emitter__:
+                final_status_message = f"Completed in {contribution_time_str}."
+                self.emit_status_sync(__event_emitter__, final_status_message, done=True)
+                self.log_debug(f"[pipe] Final status 'Completed in {contribution_time_str}.' emitted.")
+
+            # Step 8: Return the Flowise output
             if "response" in output:
                 self.log_debug("[pipe] Flowise request successful.")
                 return {"status": "success", "data": output["response"]}
@@ -815,6 +867,34 @@ class Pipe:
                 self.log_error(f"[emit_status_sync] Error emitting status event: {e}", exc_info=True)
             finally:
                 self.log_debug("[emit_status_sync] Finished emitting status event.")
+
+    def emit_output_sync(
+        self,
+        __event_emitter__: Callable[[dict], Any],
+        content: str,
+        include_collapsible: bool = False
+    ):
+        """Emit message updates to the event emitter synchronously."""
+        if __event_emitter__ and content:
+            # Verify __event_emitter__ is callable
+            if not callable(__event_emitter__):
+                self.log_debug(f"[EMIT_OUTPUT] __event_emitter__ is not callable: {type(__event_emitter__)}")
+                raise TypeError(f"__event_emitter__ must be callable, got {type(__event_emitter__)}")
+
+            # Prepare the message event
+            message_event = {
+                "type": "message",
+                "data": {"content": content},
+            }
+
+            self.log_debug(f"[EMIT_OUTPUT] Emitting message event: {message_event}")
+            try:
+                __event_emitter__(message_event)
+                self.log_debug("[emit_output_sync] Message event emitted successfully.")
+            except Exception as e:
+                self.log_error(f"[emit_output_sync] Error emitting message event: {e}", exc_info=True)
+            finally:
+                self.log_debug("[emit_output_sync] Finished emitting message event.")
 
     def reset_state(self):
         """Reset state variables for reuse in new requests."""
