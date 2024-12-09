@@ -1,3 +1,9 @@
+"""
+TODO
+- [x] Static chatflow definitions
+- [x] Dynamic chatflow definitions
+- [ ] Fix hang when no config 
+"""
 import json
 import time
 import re
@@ -340,6 +346,7 @@ class Pipe:
                             self.log_debug(f"[load_dynamic_chatflows] Chatflow '{name}' is blacklisted. Skipping.")
                             continue
 
+                        # Sanitize name
                         sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
                         self.log_debug(f"[load_dynamic_chatflows] Sanitized name: '{sanitized_name}'")
 
@@ -373,7 +380,7 @@ class Pipe:
             self.log_error(f"[load_dynamic_chatflows] Fatal error during dynamic chatflow retrieval: {e}", exc_info=True)
         finally:
             self.log_debug("[load_dynamic_chatflows] Completed dynamic chatflow retrieval process.")
-        
+
         return dynamic_chatflows
 
     def load_static_chatflows(self) -> Dict[str, str]:
@@ -505,24 +512,31 @@ class Pipe:
         self.log_debug(f"[pipe] Starting new request with ID: {self.request_id}")
 
         try:
-            # Retrieve model name from the request body
+            # Retrieve and process the model name
             model_full_name = body.get("model", "").strip()
             self.log_debug(f"[pipe] Received model name: '{model_full_name}'")
 
-            # Strip manifold prefix if it exists
-            if model_full_name.startswith(self.valves.manifold_prefix):
-                self.log_debug(f"[pipe] Detected manifold prefix '{self.valves.manifold_prefix}'. Stripping it.")
-                model_name = model_full_name[len(self.valves.manifold_prefix):]
+            # Strip everything before and including the first period (.)
+            if '.' in model_full_name:
+                stripped_model_name = model_full_name.split('.', 1)[1]
+                self.log_debug(f"[pipe] Detected period in model name. Stripped to: '{stripped_model_name}'")
             else:
-                self.log_debug("[pipe] No manifold prefix detected. Using model name as is.")
-                model_name = model_full_name
+                stripped_model_name = model_full_name
+                self.log_debug(f"[pipe] No period detected in model name. Using as is: '{stripped_model_name}'")
 
-            self.log_debug(f"[pipe] Final model name after stripping prefix (if applicable): '{model_name}'")
+            # Sanitize the stripped model name
+            sanitized_model_name = re.sub(r"[^a-zA-Z0-9_]", "_", stripped_model_name)
+            self.log_debug(f"[pipe] Sanitized model name: '{sanitized_model_name}'")
 
-            # Determine the chatflow to use
+            model_name = sanitized_model_name
+            self.log_debug(f"[pipe] Final model name after processing: '{model_name}'")
+
+            # Look up the chatflow ID
             chatflow_id = self.chatflows.get(model_name)
-            if not chatflow_id:
-                self.log_debug(f"No chatflow found for model '{model_name}'. Assuming 'Flowise Setup' pipe.")
+            if chatflow_id:
+                self.log_debug(f"[pipe] Found chatflow ID '{chatflow_id}' for model name '{model_name}'.")
+            else:
+                self.log_debug(f"[pipe] No chatflow found for model name '{model_name}'. Assuming 'Flowise Setup' pipe.")
                 model_name = "Flowise Setup"
                 chatflow_id = self.chatflows.get(model_name)
 
@@ -890,6 +904,9 @@ if __name__ == "__main__":
 
     pipe = Pipe(valves=valves)
 
+    # Register chatflows
+    pipe.pipes()
+
     # Define the request body with a valid model
     body_valid = {
         "model": "flowise_manifold.owuiDocs",
@@ -906,13 +923,21 @@ if __name__ == "__main__":
         ]
     }
 
+    # Define the request body with special characters in model name
+    body_special_chars = {
+        "model": "flowise_manifold.owuiDocs!@#",
+        "messages": [
+            {"role": "user", "content": "Tell me a joke."}
+        ]
+    }
+
     # Define the request body with no messages
     body_no_messages = {
         "model": "flowise_manifold.owuiDocs",
         "messages": []
     }
 
-    # Test with synchronous event emitter
+    # Test with synchronous event emitter (Valid Model)
     print("\n--- Testing with Synchronous Event Emitter (Valid Model) ---")
     response_sync = pipe.pipe(
         body=body_valid,
@@ -921,7 +946,7 @@ if __name__ == "__main__":
     )
     print("Pipe Response (Sync):", response_sync)
 
-    # Test with asynchronous event emitter
+    # Test with asynchronous event emitter (Valid Model)
     print("\n--- Testing with Asynchronous Event Emitter (Valid Model) ---")
     async def test_async_emitter():
         response_async = pipe.pipe(
@@ -941,6 +966,15 @@ if __name__ == "__main__":
         __event_emitter__=mock_sync_event_emitter
     )
     print("Pipe Response (Invalid Model):", response_invalid)
+
+    # Test with special characters in model name
+    print("\n--- Testing with Special Characters in Model Name ---")
+    response_special = pipe.pipe(
+        body=body_special_chars,
+        __user__={"user_id": "default_user"},
+        __event_emitter__=mock_sync_event_emitter
+    )
+    print("Pipe Response (Special Characters):", response_special)
 
     # Test with no messages
     print("\n--- Testing with No Messages ---")
