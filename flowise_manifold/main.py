@@ -4,6 +4,7 @@ TODO
 - [x] Dynamic chatflow definitions
 - [ ] Fix hang when no config 
 """
+
 import json
 import time
 import re
@@ -16,25 +17,24 @@ from dataclasses import dataclass
 
 import requests  # Synchronous HTTP requests
 
+
 # Mock functions for demonstration (Replace with actual implementations)
 def generate_chat_completions(form_data):
     # Mock implementation
     time.sleep(0.1)  # Simulate network delay
     return {
         "choices": [
-            {
-                "message": {
-                    "content": "Mocked response from generate_chat_completions."
-                }
-            }
+            {"message": {"content": "Mocked response from generate_chat_completions."}}
         ]
     }
+
 
 def pop_system_message(messages):
     # Mock implementation: Assume the first message is a system message
     if messages and messages[0].get("role") == "system":
         return messages[0], messages[1:]
     return {}, messages
+
 
 @dataclass
 class User:
@@ -43,6 +43,7 @@ class User:
     name: str
     role: str
     email: str
+
 
 # Instantiate a mock user (Replace with actual user handling)
 mock_user = User(
@@ -57,7 +58,8 @@ mock_user = User(
 FLOWISE_API_ENDPOINT_PLACEHOLDER = "YOUR_FLOWISE_API_ENDPOINT"
 FLOWISE_API_KEY_PLACEHOLDER = "YOUR_FLOWISE_API_KEY"
 FLOWISE_CHATFLOW_IDS_PLACEHOLDER = "YOUR_FLOWISE_CHATFLOW_IDS"
-MANIFOLD_PREFIX_DEFAULT = "flowise_manifold."
+MANIFOLD_PREFIX_DEFAULT = "flowise/"
+
 
 class Pipe:
     """
@@ -140,7 +142,7 @@ class Pipe:
                 "Handling your request...",
                 "Working on it...",
                 "Almost there...",
-                "Just a sec..."
+                "Just a sec...",
             ],
             description="Static messages if LLM updates are not used.",
         )
@@ -173,7 +175,7 @@ class Pipe:
             description="Max time in seconds for processing the pipe method.",
         )
 
-    def __init__(self, valves: Optional['Pipe.Valves'] = None):
+    def __init__(self, valves: Optional["Pipe.Valves"] = None):
         """
         Initialize the Pipe with default valves and necessary state variables.
         """
@@ -238,14 +240,23 @@ class Pipe:
 
     def is_dynamic_config_ok(self) -> bool:
         """Check if dynamic chatflow configuration is valid."""
-        self.log_debug("[is_dynamic_config_ok] Checking dynamic chatflow configuration.")
+        self.log_debug(
+            "[is_dynamic_config_ok] Checking dynamic chatflow configuration."
+        )
         if not self.valves.use_dynamic_chatflows:
             self.log_debug("[is_dynamic_config_ok] Dynamic chatflows disabled.")
             return False
-        if not self.valves.flowise_api_key or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER:
-            self.log_error("[is_dynamic_config_ok] Dynamic chatflows enabled but API key missing/placeholder.")
+        if (
+            not self.valves.flowise_api_key
+            or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
+        ):
+            self.log_error(
+                "[is_dynamic_config_ok] Dynamic chatflows enabled but API key missing/placeholder."
+            )
             return False
-        self.log_debug("[is_dynamic_config_ok] Dynamic chatflow configuration is valid.")
+        self.log_debug(
+            "[is_dynamic_config_ok] Dynamic chatflow configuration is valid."
+        )
         return True
 
     def is_static_config_ok(self) -> bool:
@@ -254,8 +265,13 @@ class Pipe:
         if not self.valves.use_static_chatflows:
             self.log_debug("[is_static_config_ok] Static chatflows disabled.")
             return False
-        if not self.valves.flowise_chatflow_ids or self.valves.flowise_chatflow_ids == FLOWISE_CHATFLOW_IDS_PLACEHOLDER:
-            self.log_error("[is_static_config_ok] Static chatflows enabled but config empty/placeholder.")
+        if (
+            not self.valves.flowise_chatflow_ids
+            or self.valves.flowise_chatflow_ids == FLOWISE_CHATFLOW_IDS_PLACEHOLDER
+        ):
+            self.log_error(
+                "[is_static_config_ok] Static chatflows enabled but config empty/placeholder."
+            )
             return False
         self.log_debug("[is_static_config_ok] Static chatflow configuration is valid.")
         return True
@@ -274,20 +290,28 @@ class Pipe:
             self.log_debug("[load_chatflows] Loading static chatflows.")
             static_chatflows = self.load_static_chatflows()
             loaded_chatflows.update(static_chatflows)
-            self.log_debug(f"[load_chatflows] Loaded static chatflows: {static_chatflows}")
+            self.log_debug(
+                f"[load_chatflows] Loaded static chatflows: {static_chatflows}"
+            )
         else:
             if self.valves.use_static_chatflows:
-                self.log_debug("[load_chatflows] Static chatflows enabled but configuration invalid. Skipping static loading.")
+                self.log_debug(
+                    "[load_chatflows] Static chatflows enabled but configuration invalid. Skipping static loading."
+                )
 
         # Load dynamic chatflows if enabled
         if self.valves.use_dynamic_chatflows and self.is_dynamic_config_ok():
             self.log_debug("[load_chatflows] Loading dynamic chatflows.")
             dynamic_chatflows = self.load_dynamic_chatflows()
             loaded_chatflows.update(dynamic_chatflows)
-            self.log_debug(f"[load_chatflows] Loaded dynamic chatflows: {dynamic_chatflows}")
+            self.log_debug(
+                f"[load_chatflows] Loaded dynamic chatflows: {dynamic_chatflows}"
+            )
         else:
             if self.valves.use_dynamic_chatflows:
-                self.log_debug("[load_chatflows] Dynamic chatflows enabled but configuration invalid. Skipping dynamic loading.")
+                self.log_debug(
+                    "[load_chatflows] Dynamic chatflows enabled but configuration invalid. Skipping dynamic loading."
+                )
 
         # Update self.chatflows
         self.chatflows = loaded_chatflows
@@ -295,7 +319,9 @@ class Pipe:
 
         return self.chatflows
 
-    def load_dynamic_chatflows(self, retries: int = 3, delay: int = 5) -> Dict[str, str]:
+    def load_dynamic_chatflows(
+        self, retries: int = 3, delay: int = 5
+    ) -> Dict[str, str]:
         """
         Load chatflows dynamically using the Flowise API, with enhanced debugging and retry logic.
 
@@ -308,9 +334,13 @@ class Pipe:
         """
         dynamic_chatflows = {}
         try:
-            self.log_debug("[load_dynamic_chatflows] Starting dynamic chatflow retrieval.")
+            self.log_debug(
+                "[load_dynamic_chatflows] Starting dynamic chatflow retrieval."
+            )
 
-            endpoint = f"{self.valves.flowise_api_endpoint.rstrip('/')}/api/v1/chatflows"
+            endpoint = (
+                f"{self.valves.flowise_api_endpoint.rstrip('/')}/api/v1/chatflows"
+            )
             headers = {"Authorization": f"Bearer {self.valves.flowise_api_key}"}
 
             self.log_debug(f"[load_dynamic_chatflows] Endpoint: {endpoint}")
@@ -318,14 +348,26 @@ class Pipe:
 
             for attempt in range(1, retries + 1):
                 try:
-                    self.log_debug(f"[load_dynamic_chatflows] Attempt {attempt} to retrieve chatflows.")
-                    response = requests.get(endpoint, headers=headers, timeout=self.valves.chatflow_load_timeout)
-                    self.log_debug(f"[load_dynamic_chatflows] Response status: {response.status_code}")
+                    self.log_debug(
+                        f"[load_dynamic_chatflows] Attempt {attempt} to retrieve chatflows."
+                    )
+                    response = requests.get(
+                        endpoint,
+                        headers=headers,
+                        timeout=self.valves.chatflow_load_timeout,
+                    )
+                    self.log_debug(
+                        f"[load_dynamic_chatflows] Response status: {response.status_code}"
+                    )
                     raw_response = response.text
-                    self.log_debug(f"[load_dynamic_chatflows] Raw response: {raw_response}")
+                    self.log_debug(
+                        f"[load_dynamic_chatflows] Raw response: {raw_response}"
+                    )
 
                     if response.status_code != 200:
-                        self.log_error(f"[load_dynamic_chatflows] API call failed with status: {response.status_code}.")
+                        self.log_error(
+                            f"[load_dynamic_chatflows] API call failed with status: {response.status_code}."
+                        )
                         raise ValueError(f"HTTP {response.status_code}: {raw_response}")
 
                     data = json.loads(raw_response)
@@ -335,20 +377,30 @@ class Pipe:
                         name = flow.get("name", "").strip()
                         cid = flow.get("id", "").strip()
 
-                        self.log_debug(f"[load_dynamic_chatflows] Processing flow: name='{name}', id='{cid}'")
+                        self.log_debug(
+                            f"[load_dynamic_chatflows] Processing flow: name='{name}', id='{cid}'"
+                        )
 
                         if not name or not cid:
-                            self.log_debug(f"[load_dynamic_chatflows] Skipping invalid entry: {flow}")
+                            self.log_debug(
+                                f"[load_dynamic_chatflows] Skipping invalid entry: {flow}"
+                            )
                             continue
 
                         # Apply blacklist regex
-                        if re.search(self.valves.chatflow_blacklist, name, re.IGNORECASE):
-                            self.log_debug(f"[load_dynamic_chatflows] Chatflow '{name}' is blacklisted. Skipping.")
+                        if re.search(
+                            self.valves.chatflow_blacklist, name, re.IGNORECASE
+                        ):
+                            self.log_debug(
+                                f"[load_dynamic_chatflows] Chatflow '{name}' is blacklisted. Skipping."
+                            )
                             continue
 
                         # Sanitize name
                         sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-                        self.log_debug(f"[load_dynamic_chatflows] Sanitized name: '{sanitized_name}'")
+                        self.log_debug(
+                            f"[load_dynamic_chatflows] Sanitized name: '{sanitized_name}'"
+                        )
 
                         if sanitized_name in dynamic_chatflows:
                             base_name = sanitized_name
@@ -356,30 +408,50 @@ class Pipe:
                             while sanitized_name in dynamic_chatflows:
                                 sanitized_name = f"{base_name}_{suffix}"
                                 suffix += 1
-                            self.log_debug(f"[load_dynamic_chatflows] Resolved duplicate name: '{name}' -> '{sanitized_name}'")
+                            self.log_debug(
+                                f"[load_dynamic_chatflows] Resolved duplicate name: '{name}' -> '{sanitized_name}'"
+                            )
 
                         dynamic_chatflows[sanitized_name] = cid
-                        self.log_debug(f"[load_dynamic_chatflows] Added dynamic chatflow: '{sanitized_name}': '{cid}'")
+                        self.log_debug(
+                            f"[load_dynamic_chatflows] Added dynamic chatflow: '{sanitized_name}': '{cid}'"
+                        )
 
-                    self.log_debug(f"[load_dynamic_chatflows] Successfully loaded dynamic chatflows: {dynamic_chatflows}")
+                    self.log_debug(
+                        f"[load_dynamic_chatflows] Successfully loaded dynamic chatflows: {dynamic_chatflows}"
+                    )
                     return dynamic_chatflows  # Exit successfully after loading
 
                 except (requests.RequestException, ValueError) as e:
-                    self.log_error(f"[load_dynamic_chatflows] Attempt {attempt} failed: {e}", exc_info=True)
+                    self.log_error(
+                        f"[load_dynamic_chatflows] Attempt {attempt} failed: {e}",
+                        exc_info=True,
+                    )
                     if attempt < retries:
-                        self.log_debug(f"[load_dynamic_chatflows] Retrying in {delay}s...")
+                        self.log_debug(
+                            f"[load_dynamic_chatflows] Retrying in {delay}s..."
+                        )
                         time.sleep(delay)
                     else:
-                        self.log_error("[load_dynamic_chatflows] All retry attempts failed.")
+                        self.log_error(
+                            "[load_dynamic_chatflows] All retry attempts failed."
+                        )
                         self.flowise_available = False
                 except Exception as e:
-                    self.log_error(f"[load_dynamic_chatflows] Unexpected error: {e}", exc_info=True)
+                    self.log_error(
+                        f"[load_dynamic_chatflows] Unexpected error: {e}", exc_info=True
+                    )
                     self.flowise_available = False
                     break
         except Exception as e:
-            self.log_error(f"[load_dynamic_chatflows] Fatal error during dynamic chatflow retrieval: {e}", exc_info=True)
+            self.log_error(
+                f"[load_dynamic_chatflows] Fatal error during dynamic chatflow retrieval: {e}",
+                exc_info=True,
+            )
         finally:
-            self.log_debug("[load_dynamic_chatflows] Completed dynamic chatflow retrieval process.")
+            self.log_debug(
+                "[load_dynamic_chatflows] Completed dynamic chatflow retrieval process."
+            )
 
         return dynamic_chatflows
 
@@ -392,28 +464,42 @@ class Pipe:
         """
         static_chatflows = {}
         try:
-            self.log_debug("[load_static_chatflows] Starting static chatflow retrieval.")
+            self.log_debug(
+                "[load_static_chatflows] Starting static chatflow retrieval."
+            )
 
-            pairs = [pair.strip() for pair in self.valves.flowise_chatflow_ids.split(",") if ":" in pair]
+            pairs = [
+                pair.strip()
+                for pair in self.valves.flowise_chatflow_ids.split(",")
+                if ":" in pair
+            ]
             self.log_debug(f"[load_static_chatflows] Extracted pairs: {pairs}")
 
             for pair in pairs:
                 try:
                     name, flow_id = map(str.strip, pair.split(":", 1))
-                    self.log_debug(f"[load_static_chatflows] Processing pair: name='{name}', id='{flow_id}'")
+                    self.log_debug(
+                        f"[load_static_chatflows] Processing pair: name='{name}', id='{flow_id}'"
+                    )
 
                     if not name or not flow_id:
-                        self.log_debug(f"[load_static_chatflows] Skipping invalid pair: '{pair}'")
+                        self.log_debug(
+                            f"[load_static_chatflows] Skipping invalid pair: '{pair}'"
+                        )
                         continue
 
                     # Validate flow_id
                     if not re.match(r"^[a-zA-Z0-9_-]+$", flow_id):
-                        self.log_debug(f"[load_static_chatflows] Invalid flow_id '{flow_id}' for pair '{pair}'. Skipping.")
+                        self.log_debug(
+                            f"[load_static_chatflows] Invalid flow_id '{flow_id}' for pair '{pair}'. Skipping."
+                        )
                         continue
 
                     # Sanitize name
                     sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-                    self.log_debug(f"[load_static_chatflows] Sanitized name: '{sanitized_name}'")
+                    self.log_debug(
+                        f"[load_static_chatflows] Sanitized name: '{sanitized_name}'"
+                    )
 
                     if sanitized_name in static_chatflows:
                         base_name = sanitized_name
@@ -421,24 +507,41 @@ class Pipe:
                         while sanitized_name in static_chatflows:
                             sanitized_name = f"{base_name}_{suffix}"
                             suffix += 1
-                        self.log_debug(f"[load_static_chatflows] Resolved duplicate name: '{name}' -> '{sanitized_name}'")
+                        self.log_debug(
+                            f"[load_static_chatflows] Resolved duplicate name: '{name}' -> '{sanitized_name}'"
+                        )
 
                     static_chatflows[sanitized_name] = flow_id
-                    self.log_debug(f"[load_static_chatflows] Added static chatflow: '{sanitized_name}': '{flow_id}'")
+                    self.log_debug(
+                        f"[load_static_chatflows] Added static chatflow: '{sanitized_name}': '{flow_id}'"
+                    )
 
                 except ValueError as ve:
-                    self.log_error(f"[load_static_chatflows] Error parsing pair '{pair}': {ve}", exc_info=True)
+                    self.log_error(
+                        f"[load_static_chatflows] Error parsing pair '{pair}': {ve}",
+                        exc_info=True,
+                    )
                 except Exception as e:
-                    self.log_error(f"[load_static_chatflows] Unexpected error processing pair '{pair}': {e}", exc_info=True)
+                    self.log_error(
+                        f"[load_static_chatflows] Unexpected error processing pair '{pair}': {e}",
+                        exc_info=True,
+                    )
 
-            self.log_debug(f"[load_static_chatflows] Successfully loaded static chatflows: {static_chatflows}")
+            self.log_debug(
+                f"[load_static_chatflows] Successfully loaded static chatflows: {static_chatflows}"
+            )
             return static_chatflows
 
         except Exception as e:
-            self.log_error(f"[load_static_chatflows] Unexpected error during static chatflow loading: {e}", exc_info=True)
+            self.log_error(
+                f"[load_static_chatflows] Unexpected error during static chatflow loading: {e}",
+                exc_info=True,
+            )
             return static_chatflows
         finally:
-            self.log_debug("[load_static_chatflows] Finished static chatflow retrieval.")
+            self.log_debug(
+                "[load_static_chatflows] Finished static chatflow retrieval."
+            )
 
     def pipes(self) -> List[dict]:
         """
@@ -455,7 +558,9 @@ class Pipe:
 
         # If no chatflows are available after loading, add the setup pipe
         if not self.chatflows:
-            self.log_debug("[pipes] No chatflows available after loading. Registering 'Flowise Setup' pipe.")
+            self.log_debug(
+                "[pipes] No chatflows available after loading. Registering 'Flowise Manifold Setup' pipe."
+            )
             self.register_flowise_setup_pipe()
 
         # Register all chatflows as models
@@ -465,19 +570,21 @@ class Pipe:
 
     def register_flowise_setup_pipe(self):
         """
-        Register the 'Flowise Setup' pipe to emit advisory instructions.
+        Register the 'Flowise Manifold Setup' pipe to emit advisory instructions.
 
         This pipe is used when no chatflows are configured correctly.
         """
         advisory_message = (
-            "Flowise Setup Required:\n\n"
+            "Flowise Manifold Setup Required:\n\n"
             "No chatflows are currently registered. Please configure chatflows by:\n"
             "1. Enabling dynamic chatflows with a valid Flowise API key.\n"
             "2. Enabling static chatflows by providing 'Name:ID' pairs in 'flowise_chatflow_ids'.\n\n"
             "Ensure that the Flowise API endpoint is correctly configured in 'flowise_api_endpoint'."
         )
         self.chatflows["Flowise Setup"] = "flowise_setup_pipe_id"
-        self.log_debug(f"[register_flowise_setup_pipe] Registered 'Flowise Setup' pipe with ID 'flowise_setup_pipe_id'.")
+        self.log_debug(
+            f"[register_flowise_setup_pipe] Registered 'Flowise Setup' pipe with ID 'flowise_setup_pipe_id'."
+        )
 
     def get_chatflows(self) -> Dict[str, str]:
         """
@@ -517,12 +624,16 @@ class Pipe:
             self.log_debug(f"[pipe] Received model name: '{model_full_name}'")
 
             # Strip everything before and including the first period (.)
-            if '.' in model_full_name:
-                stripped_model_name = model_full_name.split('.', 1)[1]
-                self.log_debug(f"[pipe] Detected period in model name. Stripped to: '{stripped_model_name}'")
+            if "." in model_full_name:
+                stripped_model_name = model_full_name.split(".", 1)[1]
+                self.log_debug(
+                    f"[pipe] Detected period in model name. Stripped to: '{stripped_model_name}'"
+                )
             else:
                 stripped_model_name = model_full_name
-                self.log_debug(f"[pipe] No period detected in model name. Using as is: '{stripped_model_name}'")
+                self.log_debug(
+                    f"[pipe] No period detected in model name. Using as is: '{stripped_model_name}'"
+                )
 
             # Sanitize the stripped model name
             sanitized_model_name = re.sub(r"[^a-zA-Z0-9_]", "_", stripped_model_name)
@@ -534,9 +645,13 @@ class Pipe:
             # Look up the chatflow ID
             chatflow_id = self.chatflows.get(model_name)
             if chatflow_id:
-                self.log_debug(f"[pipe] Found chatflow ID '{chatflow_id}' for model name '{model_name}'.")
+                self.log_debug(
+                    f"[pipe] Found chatflow ID '{chatflow_id}' for model name '{model_name}'."
+                )
             else:
-                self.log_debug(f"[pipe] No chatflow found for model name '{model_name}'. Assuming 'Flowise Setup' pipe.")
+                self.log_debug(
+                    f"[pipe] No chatflow found for model name '{model_name}'. Assuming 'Flowise Setup' pipe."
+                )
                 model_name = "Flowise Setup"
                 chatflow_id = self.chatflows.get(model_name)
 
@@ -551,7 +666,9 @@ class Pipe:
                 )
                 self.log_debug(f"[pipe] Advisory message: {advisory_message}")
                 if __event_emitter__:
-                    self.emit_output_sync(__event_emitter__, advisory_message, include_collapsible=False)
+                    self.emit_output_sync(
+                        __event_emitter__, advisory_message, include_collapsible=False
+                    )
                 return {"status": "setup", "message": advisory_message}
 
             # At this point, chatflow_id should be valid
@@ -563,7 +680,9 @@ class Pipe:
                 return {"status": "error", "message": error_message}
 
             # Process the request using the selected chatflow
-            self.log_debug(f"[pipe] Using chatflow '{model_name}' with ID '{chatflow_id}'")
+            self.log_debug(
+                f"[pipe] Using chatflow '{model_name}' with ID '{chatflow_id}'"
+            )
             messages = body.get("messages", [])
             if not messages:
                 error_message = "No messages found in the request."
@@ -574,22 +693,30 @@ class Pipe:
 
             system_message, user_messages = pop_system_message(messages)
             self.log_debug(f"[pipe] System message: {system_message}")
-            self.log_debug(f"[pipe] User messages after popping system message: {user_messages}")
+            self.log_debug(
+                f"[pipe] User messages after popping system message: {user_messages}"
+            )
 
             combined_prompt = self._get_combined_prompt(user_messages)
-            self.log_debug(f"[pipe] Combined prompt for chatflow '{model_name}':\n{combined_prompt}")
+            self.log_debug(
+                f"[pipe] Combined prompt for chatflow '{model_name}':\n{combined_prompt}"
+            )
 
             # Emit status: Processing the request
             if __event_emitter__:
-                self.emit_status_sync(__event_emitter__, "Processing your request", done=False)
-                self.log_debug("[pipe] Initial status 'Processing your request' emitted.")
+                self.emit_status_sync(
+                    __event_emitter__, "Processing your request", done=False
+                )
+                self.log_debug(
+                    "[pipe] Initial status 'Processing your request' emitted."
+                )
 
             # Handle Flowise request
             output = self.handle_flowise_request(
                 question=combined_prompt,
                 __user__=__user__,
                 __event_emitter__=__event_emitter__,
-                chatflow_name=model_name
+                chatflow_name=model_name,
             )
             self.log_debug(f"[pipe] handle_flowise_request output: {output}")
 
@@ -599,7 +726,9 @@ class Pipe:
                     final_status_message = "Request completed successfully."
                 else:
                     final_status_message = "Request completed with errors."
-                self.emit_status_sync(__event_emitter__, final_status_message, done=True)
+                self.emit_status_sync(
+                    __event_emitter__, final_status_message, done=True
+                )
                 self.log_debug(f"[pipe] Final status '{final_status_message}' emitted.")
 
             return output
@@ -609,7 +738,9 @@ class Pipe:
             if __event_emitter__:
                 error_message = f"Error processing request: {str(e)}"
                 self.emit_status_sync(__event_emitter__, "Error", done=True)
-                self.emit_output_sync(__event_emitter__, error_message, include_collapsible=False)
+                self.emit_output_sync(
+                    __event_emitter__, error_message, include_collapsible=False
+                )
             return {"status": "error", "message": str(e)}
 
         finally:
@@ -627,19 +758,28 @@ class Pipe:
                 "type": "status",
                 "data": {"description": message, "done": done},
             }
-            self.log_debug(f"[emit_status_sync] Preparing to emit status event: {event}")
+            self.log_debug(
+                f"[emit_status_sync] Preparing to emit status event: {event}"
+            )
 
             try:
                 if asyncio.iscoroutinefunction(__event_emitter__):
-                    self.log_debug("[emit_status_sync] Detected asynchronous event emitter.")
+                    self.log_debug(
+                        "[emit_status_sync] Detected asynchronous event emitter."
+                    )
                     asyncio.create_task(__event_emitter__(event))
                 else:
-                    self.log_debug("[emit_status_sync] Detected synchronous event emitter.")
+                    self.log_debug(
+                        "[emit_status_sync] Detected synchronous event emitter."
+                    )
                     __event_emitter__(event)
 
                 self.log_debug("[emit_status_sync] Status event emitted successfully.")
             except Exception as e:
-                self.log_error(f"[emit_status_sync] Error emitting status event: {e}", exc_info=True)
+                self.log_error(
+                    f"[emit_status_sync] Error emitting status event: {e}",
+                    exc_info=True,
+                )
             finally:
                 self.log_debug("[emit_status_sync] Finished emitting status event.")
 
@@ -647,7 +787,7 @@ class Pipe:
         self,
         __event_emitter__: Callable[[dict], Any],
         content: str,
-        include_collapsible: bool = False
+        include_collapsible: bool = False,
     ):
         """Emit message updates to the event emitter synchronously."""
         if __event_emitter__ and content:
@@ -656,39 +796,63 @@ class Pipe:
                 "type": "message",
                 "data": {"content": content},
             }
-            self.log_debug(f"[emit_output_sync] Preparing to emit message event: {message_event}")
+            self.log_debug(
+                f"[emit_output_sync] Preparing to emit message event: {message_event}"
+            )
 
             try:
                 if asyncio.iscoroutinefunction(__event_emitter__):
-                    self.log_debug("[emit_output_sync] Detected asynchronous event emitter.")
+                    self.log_debug(
+                        "[emit_output_sync] Detected asynchronous event emitter."
+                    )
                     asyncio.create_task(__event_emitter__(message_event))
                 else:
-                    self.log_debug("[emit_output_sync] Detected synchronous event emitter.")
+                    self.log_debug(
+                        "[emit_output_sync] Detected synchronous event emitter."
+                    )
                     __event_emitter__(message_event)
 
                 self.log_debug("[emit_output_sync] Message event emitted successfully.")
             except Exception as e:
-                self.log_error(f"[emit_output_sync] Error emitting message event: {e}", exc_info=True)
+                self.log_error(
+                    f"[emit_output_sync] Error emitting message event: {e}",
+                    exc_info=True,
+                )
             finally:
                 self.log_debug("[emit_output_sync] Finished emitting message event.")
 
             # Emit collapsible content if required
-            if include_collapsible and hasattr(self.valves, 'use_collapsible') and self.valves.use_collapsible:
-                self.log_debug("[emit_output_sync] Preparing to emit collapsible section.")
+            if (
+                include_collapsible
+                and hasattr(self.valves, "use_collapsible")
+                and self.valves.use_collapsible
+            ):
+                self.log_debug(
+                    "[emit_output_sync] Preparing to emit collapsible section."
+                )
                 collapsible_event = {
                     "type": "message",
-                    "data": {"content": "Additional model output in collapsible format."},
+                    "data": {
+                        "content": "Additional model output in collapsible format."
+                    },
                 }
                 try:
                     if asyncio.iscoroutinefunction(__event_emitter__):
                         asyncio.create_task(__event_emitter__(collapsible_event))
                     else:
                         __event_emitter__(collapsible_event)
-                    self.log_debug("[emit_output_sync] Collapsible section emitted successfully.")
+                    self.log_debug(
+                        "[emit_output_sync] Collapsible section emitted successfully."
+                    )
                 except Exception as e:
-                    self.log_error(f"[emit_output_sync] Error emitting collapsible section: {e}", exc_info=True)
+                    self.log_error(
+                        f"[emit_output_sync] Error emitting collapsible section: {e}",
+                        exc_info=True,
+                    )
                 finally:
-                    self.log_debug("[emit_output_sync] Finished emitting collapsible section.")
+                    self.log_debug(
+                        "[emit_output_sync] Finished emitting collapsible section."
+                    )
 
     def handle_flowise_request(
         self,
@@ -709,22 +873,30 @@ class Pipe:
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: Response from Flowise or error message.
         """
-        self.log_debug(f"[handle_flowise_request] Handling request for '{chatflow_name}' question: {question!r}")
+        self.log_debug(
+            f"[handle_flowise_request] Handling request for '{chatflow_name}' question: {question!r}"
+        )
         try:
             # Prepare payload
             payload = {"question": question}
             self.log_debug(f"[handle_flowise_request] Initial payload: {payload}")
 
-            user_id = __user__.get("user_id", "default_user") if __user__ else "default_user"
+            user_id = (
+                __user__.get("user_id", "default_user") if __user__ else "default_user"
+            )
             self.log_debug(f"[handle_flowise_request] User ID: {user_id}")
 
             chat_session = self.chat_sessions.get(user_id, {})
-            self.log_debug(f"[handle_flowise_request] Current chat session: {chat_session}")
+            self.log_debug(
+                f"[handle_flowise_request] Current chat session: {chat_session}"
+            )
 
             chat_id = chat_session.get("chat_id")
             if chat_id:
                 payload["chatId"] = chat_id
-                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {chat_id}")
+                self.log_debug(
+                    f"[handle_flowise_request] Added chatId to payload: {chat_id}"
+                )
 
             self.log_debug(f"[handle_flowise_request] Final payload: {payload}")
 
@@ -732,29 +904,43 @@ class Pipe:
             if not chatflow_name or chatflow_name not in self.chatflows:
                 if self.chatflows:
                     chatflow_name = list(self.chatflows.keys())[0]
-                    self.log_debug(f"[handle_flowise_request] No or invalid chatflow_name provided. Using '{chatflow_name}'.")
+                    self.log_debug(
+                        f"[handle_flowise_request] No or invalid chatflow_name provided. Using '{chatflow_name}'."
+                    )
                 else:
                     error_message = "No chatflows configured."
                     self.log_debug(f"[handle_flowise_request] {error_message}")
                     if __event_emitter__:
-                        self.emit_status_sync(__event_emitter__, error_message, done=True)
+                        self.emit_status_sync(
+                            __event_emitter__, error_message, done=True
+                        )
                     return {"error": error_message}
 
             chatflow_id = self.chatflows[chatflow_name]
-            self.log_debug(f"[handle_flowise_request] Selected chatflow ID: {chatflow_id}")
+            self.log_debug(
+                f"[handle_flowise_request] Selected chatflow ID: {chatflow_id}"
+            )
 
             endpoint = self.valves.flowise_api_endpoint.rstrip("/")
             url = f"{endpoint}/api/v1/prediction/{chatflow_id}"
             headers = {"Content-Type": "application/json"}
-            self.log_debug(f"[handle_flowise_request] Sending request to URL: {url} with headers: {headers}")
+            self.log_debug(
+                f"[handle_flowise_request] Sending request to URL: {url} with headers: {headers}"
+            )
 
-            response = requests.post(url, json=payload, headers=headers, timeout=self.valves.request_timeout)
-            self.log_debug(f"[handle_flowise_request] Response status: {response.status_code}")
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=self.valves.request_timeout
+            )
+            self.log_debug(
+                f"[handle_flowise_request] Response status: {response.status_code}"
+            )
             response_text = response.text
             self.log_debug(f"[handle_flowise_request] Response text: {response_text!r}")
 
             if response.status_code != 200:
-                error_message = f"Error: Flowise API call failed with status {response.status_code}"
+                error_message = (
+                    f"Error: Flowise API call failed with status {response.status_code}"
+                )
                 self.log_debug(f"[handle_flowise_request] {error_message}")
                 return {"error": error_message}
 
@@ -782,16 +968,26 @@ class Pipe:
             # Update chat session
             if user_id not in self.chat_sessions:
                 self.chat_sessions[user_id] = {"chat_id": None, "history": []}
-                self.log_debug(f"[handle_flowise_request] Created new chat session for user '{user_id}'.")
+                self.log_debug(
+                    f"[handle_flowise_request] Created new chat session for user '{user_id}'."
+                )
 
             self.chat_sessions[user_id]["chat_id"] = new_chat_id
-            self.chat_sessions[user_id]["history"].append({"role": "assistant", "content": text})
-            self.log_debug(f"[handle_flowise_request] Updated history for user '{user_id}': {self.chat_sessions[user_id]['history']}")
+            self.chat_sessions[user_id]["history"].append(
+                {"role": "assistant", "content": text}
+            )
+            self.log_debug(
+                f"[handle_flowise_request] Updated history for user '{user_id}': {self.chat_sessions[user_id]['history']}"
+            )
 
             # Emit the Flowise response via the event emitter
             if __event_emitter__:
-                self.log_debug(f"[handle_flowise_request] Emitting Flowise response via emit_output_sync.")
-                self.emit_output_sync(__event_emitter__, text, include_collapsible=False)
+                self.log_debug(
+                    f"[handle_flowise_request] Emitting Flowise response via emit_output_sync."
+                )
+                self.emit_output_sync(
+                    __event_emitter__, text, include_collapsible=False
+                )
 
             return {"response": text}
 
@@ -804,7 +1000,9 @@ class Pipe:
             self.log_error(f"[handle_flowise_request] {error_message}", exc_info=True)
             return {"error": error_message}
         finally:
-            self.log_debug("[handle_flowise_request] Finished handling Flowise request.")
+            self.log_debug(
+                "[handle_flowise_request] Finished handling Flowise request."
+            )
 
     def clean_response_text(self, text: str) -> str:
         """
@@ -879,108 +1077,3 @@ class Pipe:
             return "Unknown time"
         finally:
             self.log_debug("[format_elapsed_time] Finished formatting elapsed time.")
-
-# Example Mock Event Emitters for Testing
-def mock_sync_event_emitter(event):
-    print("Synchronous Event Emitted:", event)
-
-async def mock_async_event_emitter(event):
-    print("Asynchronous Event Emitted:", event)
-
-# Example Usage and Testing
-if __name__ == "__main__":
-    import asyncio
-
-    # Initialize the Pipe with valid static chatflows
-    valves = Pipe.Valves(
-        flowise_api_endpoint="http://host.docker.internal:3030/",
-        flowise_api_key="VALID_FLOWISE_API_KEY",  # Replace with actual key or mock
-        use_dynamic_chatflows=False,  # Dynamic chatflows disabled
-        use_static_chatflows=True,
-        flowise_chatflow_ids="owuiDocs:e208c6f0-24bc-45e3-b7cd-ee88df6096e1",
-        manifold_prefix="flowise_manifold.",  # Set to 'flowise_manifold.' as per requirement
-        enable_debug=True
-    )
-
-    pipe = Pipe(valves=valves)
-
-    # Register chatflows
-    pipe.pipes()
-
-    # Define the request body with a valid model
-    body_valid = {
-        "model": "flowise_manifold.owuiDocs",
-        "messages": [
-            {"role": "user", "content": "hi"}
-        ]
-    }
-
-    # Define the request body with an invalid model
-    body_invalid = {
-        "model": "flowise_manifold.unknownChatflow",
-        "messages": [
-            {"role": "user", "content": "hi"}
-        ]
-    }
-
-    # Define the request body with special characters in model name
-    body_special_chars = {
-        "model": "flowise_manifold.owuiDocs!@#",
-        "messages": [
-            {"role": "user", "content": "Tell me a joke."}
-        ]
-    }
-
-    # Define the request body with no messages
-    body_no_messages = {
-        "model": "flowise_manifold.owuiDocs",
-        "messages": []
-    }
-
-    # Test with synchronous event emitter (Valid Model)
-    print("\n--- Testing with Synchronous Event Emitter (Valid Model) ---")
-    response_sync = pipe.pipe(
-        body=body_valid,
-        __user__={"user_id": "default_user"},
-        __event_emitter__=mock_sync_event_emitter
-    )
-    print("Pipe Response (Sync):", response_sync)
-
-    # Test with asynchronous event emitter (Valid Model)
-    print("\n--- Testing with Asynchronous Event Emitter (Valid Model) ---")
-    async def test_async_emitter():
-        response_async = pipe.pipe(
-            body=body_valid,
-            __user__={"user_id": "default_user"},
-            __event_emitter__=mock_async_event_emitter
-        )
-        print("Pipe Response (Async):", response_async)
-
-    asyncio.run(test_async_emitter())
-
-    # Test with invalid model
-    print("\n--- Testing with Invalid Model ---")
-    response_invalid = pipe.pipe(
-        body=body_invalid,
-        __user__={"user_id": "default_user"},
-        __event_emitter__=mock_sync_event_emitter
-    )
-    print("Pipe Response (Invalid Model):", response_invalid)
-
-    # Test with special characters in model name
-    print("\n--- Testing with Special Characters in Model Name ---")
-    response_special = pipe.pipe(
-        body=body_special_chars,
-        __user__={"user_id": "default_user"},
-        __event_emitter__=mock_sync_event_emitter
-    )
-    print("Pipe Response (Special Characters):", response_special)
-
-    # Test with no messages
-    print("\n--- Testing with No Messages ---")
-    response_no_messages = pipe.pipe(
-        body=body_no_messages,
-        __user__={"user_id": "default_user"},
-        __event_emitter__=mock_sync_event_emitter
-    )
-    print("Pipe Response (No Messages):", response_no_messages)
