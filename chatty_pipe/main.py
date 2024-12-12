@@ -1,14 +1,13 @@
 """
 title: Chatty Pipe
 author: matthewh
-version: 0.9.0
+version: 0.1.0
 required_open_webui_version: 0.4.0
 
 Instructions:
 1. Configure the Chat Completion Engine:
     - Go to Admin Panel > Settings > Chat.
-    - Set Chat Completion Engine to "Default (Open AI)".
-    - Use model "llama3.2:latest"
+    - Set a base model ie "llama3.2:latest"
 2. Enable the Chatty Pipe:
     - Navigate to Workspace > Functions.
     - Ensure that the Pipe is enabled.
@@ -17,8 +16,9 @@ Instructions:
     - Select "Chatty Pipe" from the model dropdown list.
 
 - [x] Follow up feature.
-- [ ] Status completion when interrupted
+- [ ] Update status completion when interrupted by user
 - [ ] Don't error when base model has a system prompt
+- [ ] Reset conversation with __init__ so chats don't carry over (?)
 """
 
 from typing import Optional, Callable, Awaitable, Dict, Any, List
@@ -57,10 +57,16 @@ class Pipe:
             description="Enable or disable status message emissions.",
         )
 
-        # Valve for overriding the follow-up system message
-        follow_up_system_message_override: str = Field(
-            default="your-follow-up-system-prompt",
-            description="Override for the follow-up system prompt. If set to 'your-follow-up-system-prompt', the system uses the existing system prompt. Otherwise, it uses the provided override prompt.",
+        # Valve for toggling the follow-up system message
+        enable_follow_up_system_message: bool = Field(
+            default=True,
+            description="Enable or disable the follow-up system message.",
+        )
+
+        # Follow-up system message
+        follow_up_system_message: str = Field(
+            default="You are concerned that the user has abandoned the conversation, check that they are still there by questioning them succinctly.",
+            description="System message to use for follow-up prompts when enabled.",
         )
 
         # Valves for follow-up timer
@@ -77,12 +83,6 @@ class Pipe:
         max_follow_ups: int = Field(
             default=2,
             description="Maximum number of follow-up messages before emitting a 'Completed' status.",
-        )
-
-        # Timeout after which to emit 'Interrupted' if no new follow-ups
-        follow_up_timeout: float = Field(
-            default=60.0,
-            description="Timeout in seconds after which to emit 'Interrupted' if no new follow-up messages are detected.",
         )
 
         # Common valve
@@ -106,12 +106,16 @@ class Pipe:
         # Each user_id maps to a dict with:
         # - 'messages' (list)
         # - 'timer_task' (asyncio.Task or None)
-        # - 'interruption_task' (asyncio.Task or None)
         # - 'follow_up_count' (int)
         # - 'system_prompt' (str)
         # - 'timer_version' (int)
         self.conversation_history: Dict[str, Dict[str, Any]] = {}
         self.lock = asyncio.Lock()
+
+        # TODO: Reset conversation with __init__
+        # Ensuring that conversation_history is empty upon initialization
+        self.conversation_history.clear()
+        self.log.debug("Initialized Pipe with empty conversation history.")
 
     def clean_message(self, message: str) -> str:
         """
@@ -133,8 +137,6 @@ class Pipe:
         self,
         base_model_id: str,
         messages: List[Dict[str, str]],
-        max_tokens: int,
-        temperature: float,
     ) -> Optional[str]:
         """
         Helper method to handle LLM chat completions with full conversation history.
@@ -142,8 +144,6 @@ class Pipe:
         Args:
             base_model_id (str): The model ID to use.
             messages (List[Dict[str, str]]): The list of messages representing the conversation.
-            max_tokens (int): Maximum tokens for the response.
-            temperature (float): Temperature setting for the response.
 
         Returns:
             Optional[str]: The generated content or None if failed.
@@ -151,8 +151,7 @@ class Pipe:
         payload = {
             "model": base_model_id,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            # Removed 'max_tokens' and 'temperature' to allow base_model configuration
         }
 
         self.log.debug(
@@ -203,7 +202,6 @@ class Pipe:
                 self.conversation_history[user_id] = {
                     "messages": [],
                     "timer_task": None,
-                    "interruption_task": None,
                     "follow_up_count": 0,
                     "system_prompt": "You are a helpful assistant.",
                     "timer_version": 0,
@@ -232,23 +230,11 @@ class Pipe:
                 }
             ] + self.conversation_history[user_id]["messages"]
 
-            # Cancel any existing interruption_task as user has responded
-            existing_interruption_task = self.conversation_history[user_id].get(
-                "interruption_task"
-            )
-            if existing_interruption_task and not existing_interruption_task.done():
-                existing_interruption_task.cancel()
-                self.log.debug(
-                    f"Cancelled existing interruption timer for user {user_id} due to new user message."
-                )
-
         # Generate LLM response with full conversation history
         self.log.debug(f"Generating chat completion for user {user_id}.")
         llm_response = await self.call_llm(
             base_model_id=base_model_id,
             messages=conversation,
-            max_tokens=200,  # Increased max_tokens for more detailed responses
-            temperature=0.7,
         )
 
         if llm_response:
@@ -362,19 +348,17 @@ class Pipe:
             f"Generating follow-up message for user {user_id} with instruction: {follow_up_instruction}"
         )
 
-        # Determine which system prompt to use based on the override valve
-        if (
-            self.valves.follow_up_system_message_override
-            != "your-follow-up-system-prompt"
-        ):
-            follow_up_system_prompt = self.valves.follow_up_system_message_override
+        # Determine which system prompt to use based on the new boolean valve
+        if self.valves.enable_follow_up_system_message:
+            follow_up_system_prompt = self.valves.follow_up_system_message
             self.log.debug(
-                f"Using overridden follow-up system prompt for user {user_id}: {follow_up_system_prompt}"
+                f"Using follow-up system prompt for user {user_id}: {follow_up_system_prompt}"
             )
         else:
-            follow_up_system_prompt = system_prompt
+            # If the follow-up system message is disabled, use a default system prompt
+            follow_up_system_prompt = "You are a helpful assistant."
             self.log.debug(
-                f"Using existing system prompt for user {user_id}: {follow_up_system_prompt}"
+                f"Follow-up system message is disabled. Using default system prompt for user {user_id}: {follow_up_system_prompt}"
             )
 
         # Create a new list of messages including the follow-up instruction as a separate 'user' message
@@ -393,8 +377,6 @@ class Pipe:
         follow_up_message = await self.call_llm(
             base_model_id=base_model_id,
             messages=follow_up_messages,
-            max_tokens=150,  # Increased max_tokens for more detailed follow-ups
-            temperature=0.6,  # Slightly higher temperature for variability
         )
 
         if follow_up_message:
@@ -422,20 +404,44 @@ class Pipe:
         async with self.lock:
             if user_id in self.conversation_history:
                 self.conversation_history[user_id]["follow_up_count"] += 1
+                current_follow_up_count = self.conversation_history[user_id][
+                    "follow_up_count"
+                ]
 
-        # After emitting a follow-up, set up a new follow-up timer
-        if self.valves.enable_follow_up:
+        # Only schedule another follow-up if not exceeded max_follow_ups
+        if current_follow_up_count < self.valves.max_follow_ups:
             await self.emit_follow_up_with_status(__event_emitter__, user_id)
+        else:
+            if self.valves.enable_status_emits:
+                completed_message = "Completed\n"
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": completed_message, "done": True},
+                    }
+                )
+                self.log.debug(
+                    f"Emitted completed status message to user {user_id}: {completed_message.strip()}"
+                )
 
     async def emit_follow_up_with_status(
         self,
         __event_emitter__: Callable[[dict], Awaitable[None]],
         user_id: str,
     ):
-        """Emit status events indicating the wait time before sending a follow-up message and handle 'Interrupted'."""
+        """Emit status events indicating the wait time before sending a follow-up message."""
         if not self.valves.enable_follow_up:
             self.log.debug("Follow-up messages are disabled via valves.")
             return
+
+        # Check if follow_up_count < max_follow_ups before emitting status
+        async with self.lock:
+            follow_up_count = self.conversation_history[user_id]["follow_up_count"]
+            if follow_up_count >= self.valves.max_follow_ups:
+                self.log.debug(
+                    f"User {user_id} has reached maximum follow-ups ({self.valves.max_follow_ups}). No further follow-ups will be scheduled."
+                )
+                return
 
         # Calculate total delay
         total_delay = self.valves.fixed_delay + random.uniform(
@@ -458,7 +464,7 @@ class Pipe:
                 f"Emitted status event for user {user_id}: {status_message.strip()}"
             )
 
-        # Start the follow-up timer coroutine with versioning
+        # Start the follow-up timer coroutine
         async with self.lock:
             timer_version = self.conversation_history[user_id]["timer_version"]
 
@@ -483,28 +489,6 @@ class Pipe:
             # Assign the new follow-up task
             self.conversation_history[user_id]["timer_task"] = follow_up_task
 
-            # Start the interruption timer
-            # Cancel any existing interruption_task
-            existing_interruption_task = self.conversation_history[user_id].get(
-                "interruption_task"
-            )
-            if existing_interruption_task and not existing_interruption_task.done():
-                existing_interruption_task.cancel()
-                self.log.debug(
-                    f"Cancelled existing interruption timer for user {user_id}."
-                )
-
-            # Start a new interruption_task
-            interruption_task = asyncio.create_task(
-                self.emit_follow_up_timeout(
-                    __event_emitter__,
-                    user_id,
-                    self.valves.follow_up_timeout,
-                    timer_version,
-                )
-            )
-            self.conversation_history[user_id]["interruption_task"] = interruption_task
-
     async def follow_up_timer_handler_with_status(
         self,
         __event_emitter__: Callable[[dict], Awaitable[None]],
@@ -512,7 +496,7 @@ class Pipe:
         delay: float,
         timer_version: int,
     ):
-        """Handle the follow-up timer and emit the follow-up message followed by 'Completed' status."""
+        """Handle the follow-up timer and emit the follow-up message."""
         try:
             # Wait for the total delay
             await asyncio.sleep(delay)
@@ -539,59 +523,6 @@ class Pipe:
             async with self.lock:
                 if user_id in self.conversation_history:
                     self.conversation_history[user_id]["timer_task"] = None
-
-    async def emit_follow_up_timeout(
-        self,
-        __event_emitter__: Callable[[dict], Awaitable[None]],
-        user_id: str,
-        timeout: float,
-        timer_version: int,
-    ):
-        """Handle the follow-up timeout and emit 'Interrupted' status."""
-        try:
-            # Wait for the follow-up timeout
-            await asyncio.sleep(timeout)
-
-            # Before emitting 'Interrupted', check if this timeout is still valid
-            async with self.lock:
-                current_timer_version = self.conversation_history[user_id][
-                    "timer_version"
-                ]
-                if timer_version != current_timer_version:
-                    self.log.debug(
-                        f"Interruption timer version mismatch for user {user_id}. Expected {current_timer_version}, got {timer_version}. Aborting 'Interrupted' emission."
-                    )
-                    return
-
-            self.log.debug(
-                f"Follow-up timeout expired for user {user_id}. Emitting 'Interrupted' status."
-            )
-            await self.emit_interrupted(__event_emitter__, user_id)
-
-        except asyncio.CancelledError:
-            self.log.debug(f"Interruption timer was cancelled for user {user_id}.")
-            # Clear the interruption_task reference as the timer has been cancelled
-            async with self.lock:
-                if user_id in self.conversation_history:
-                    self.conversation_history[user_id]["interruption_task"] = None
-
-    async def emit_interrupted(
-        self,
-        __event_emitter__: Callable[[dict], Awaitable[None]],
-        user_id: str,
-    ):
-        """Emit 'Interrupted' status if no new follow-up messages are detected within the timeout."""
-        interrupted_message = "Interrupted\n"
-        if self.valves.enable_status_emits:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {"description": interrupted_message, "done": True},
-                }
-            )
-        self.log.debug(
-            f"Emitted interrupted status message to user {user_id}: {interrupted_message.strip()}"
-        )
 
     async def pipe(
         self,
@@ -630,27 +561,6 @@ class Pipe:
 
             # Start or reset the follow-up timer after the initial response is emitted
             if self.valves.enable_follow_up:
-                # Calculate total delay
-                total_delay = self.valves.fixed_delay + random.uniform(
-                    0, self.valves.random_delay
-                )
-                self.log.debug(
-                    f"Total follow-up delay for user {user_id}: {total_delay:.2f} seconds."
-                )
-
-                # Emit status event indicating the wait time if enabled
-                if self.valves.enable_status_emits:
-                    status_message = f"We will wait for {total_delay:.2f} seconds before sending a follow-up message.\n"
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {"description": status_message, "done": False},
-                        }
-                    )
-                    self.log.debug(
-                        f"Emitted status event for user {user_id}: {status_message.strip()}"
-                    )
-
                 # Start or reset the follow-up timer
                 await self.emit_follow_up_with_status(__event_emitter__, user_id)
 
