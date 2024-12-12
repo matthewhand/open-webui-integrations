@@ -5,16 +5,16 @@ version: 0.1.0
 required_open_webui_version: 0.4.0
 
 Instructions:
-1. Configure the Chat Completion Engine:
-    - Go to Admin Panel > Settings > Chat.
-    - Set a base model ie "llama3.2:latest"
-2. Enable the Chatty Pipe:
-    - Navigate to Workspace > Functions.
+1. Configure and enable the Chat Completion Engine:
+    - Go to Admin Panel > Functions
     - Ensure that the Pipe is enabled.
-3. Start a new chat using the Pipe:
+    - Click on the Chatty Pipe Config.
+    - Set a base model ie "llama3.2:latest" and click Save.
+2. Start a new chat using the Pipe:
     - Click "New Chat".
     - Select "Chatty Pipe" from the model dropdown list.
 
+TODO
 - [x] Follow up feature.
 - [ ] Update status completion when interrupted by user
 - [ ] Don't error when base model has a system prompt
