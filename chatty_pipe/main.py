@@ -53,7 +53,7 @@ class Pipe:
 
         # Valve to enable status emissions
         enable_status_emits: bool = Field(
-            default=True,
+            default=False,
             description="Enable or disable status message emissions.",
         )
 
