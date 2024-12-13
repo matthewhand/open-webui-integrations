@@ -1,7 +1,7 @@
 """
 title: Chatty Pipe
 author: matthewh
-version: 0.2.0
+version: 0.3.3
 required_open_webui_version: 0.4.0
 
 Instructions:
@@ -16,11 +16,10 @@ Instructions:
 
 TODO
 - [x] Follow up feature.
+- [x] Internal query detection for tags and titles with proper history management.
 - [ ] Status completion when interrupted by user
 - [ ] Don't error when base model has a system prompt
-- [ ] Reset conversation with __init__
 """
-
 from typing import Optional, Callable, Awaitable, Dict, Any, List
 from pydantic import BaseModel, Field
 import asyncio
@@ -29,7 +28,7 @@ import random
 import re
 import json  # Ensure json is imported
 
-from open_webui.main import generate_chat_completions
+from open_webui.main import generate_chat_completions, get_all_models
 from open_webui.utils.misc import pop_system_message, get_last_user_message
 
 
@@ -85,9 +84,21 @@ class Pipe:
             description="Maximum number of follow-up messages before emitting a 'Completed' status.",
         )
 
+        # Valve for tag prompt detection
+        tag_prompt_detection: str = Field(
+            default='JSON format: { "tags": ["tag1", "tag2", "tag3"] }',
+            description="Detection pattern to identify tag generation requests.",
+        )
+
+        # Valve for title prompt detection
+        title_prompt_detection: str = Field(
+            default='RESPOND ONLY WITH THE TITLE TEXT.',
+            description="Detection pattern to identify title generation requests.",
+        )
+
         # Common valve
         enable_debug: bool = Field(
-            default=False, description="Enable or disable debug logging."
+            default=True, description="Enable or disable debug logging."
         )
 
     def __init__(self):
@@ -104,7 +115,7 @@ class Pipe:
 
         # Initialize conversation_history as a dict mapping user_id to their conversation data
         # Each user_id maps to a dict with:
-        # - 'messages' (list)
+        # - 'messages' (list of dicts with 'role' and 'content')
         # - 'timer_task' (asyncio.Task or None)
         # - 'follow_up_count' (int)
         # - 'system_prompt' (str)
@@ -132,23 +143,43 @@ class Pipe:
             return match.group(2)
         return message
 
+    async def get_model_by_id(self, base_model_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve the model dictionary by its ID.
+
+        Args:
+            base_model_id (str): The model ID to retrieve.
+
+        Returns:
+            Optional[Dict[str, Any]]: The model dictionary if found, else None.
+        """
+        try:
+            available_models = await get_all_models()
+            for model in available_models:
+                if model["id"] == base_model_id:
+                    return model
+            return None
+        except Exception as e:
+            self.log.error(f"Error fetching models: {e}")
+            return None
+
     async def call_llm(
         self,
-        base_model_id: str,
+        model: Dict[str, Any],
         messages: List[Dict[str, str]],
     ) -> Optional[str]:
         """
         Helper method to handle LLM chat completions with full conversation history.
 
         Args:
-            base_model_id (str): The model ID to use.
+            model (Dict[str, Any]): The model dictionary to use.
             messages (List[Dict[str, str]]): The list of messages representing the conversation.
 
         Returns:
             Optional[str]: The generated content or None if failed.
         """
         payload = {
-            "model": base_model_id,
+            "model": model["id"],
             "messages": messages,
             # Removed 'max_tokens' and 'temperature' to allow base_model configuration
         }
@@ -184,6 +215,54 @@ class Pipe:
             self.log.error(f"Error during LLM call: {e}")
             return None
 
+    async def handle_internal_query(
+        self,
+        __event_emitter__: Callable[[dict], Awaitable[None]],
+        user_id: str,
+        message: str,
+    ):
+        """Handle internal queries like tag generation or title generation."""
+        self.log.debug(f"Handling internal query for user {user_id}: {message}")
+
+        # Determine the type of internal query
+        if self.valves.tag_prompt_detection in message:
+            # Tag Generation
+            self.log.debug(f"Detected tag generation request for user {user_id}.")
+            llm_response = await self.call_llm(
+                model={"id": self.valves.base_model_id},
+                messages=[{"role": "user", "content": message}],
+            )
+        elif self.valves.title_prompt_detection in message:
+            # Title Generation
+            self.log.debug(f"Detected title generation request for user {user_id}.")
+            llm_response = await self.call_llm(
+                model={"id": self.valves.base_model_id},
+                messages=[{"role": "user", "content": message}],
+            )
+        else:
+            # Unknown internal query
+            self.log.debug(f"Unknown internal request for user {user_id}.")
+            llm_response = "Invalid internal request."
+
+        if llm_response:
+            # Emit the response with a newline
+            await __event_emitter__(
+                {
+                    "type": "message",
+                    "data": {"content": f"{llm_response}\n"},
+                }
+            )
+            self.log.debug(f"Emitted internal response to user {user_id}: {llm_response}")
+        else:
+            fallback_message = "Unable to process your internal request at the moment.\n"
+            await __event_emitter__(
+                {
+                    "type": "message",
+                    "data": {"content": fallback_message},
+                }
+            )
+            self.log.debug(f"Emitted fallback internal response to user {user_id}.")
+
     async def emit_chat_response(
         self,
         __event_emitter__: Callable[[dict], Awaitable[None]],
@@ -191,18 +270,31 @@ class Pipe:
         message: str,
     ):
         """Generate and emit a chat completion response based on user input."""
-        # No need to check for enable_llm_features or enable_chat_response as they are always enabled
-
         base_model_id = self.valves.base_model_id
 
-        # Update conversation history
+        # Retrieve and validate the model
+        model = await self.get_model_by_id(base_model_id)
+        if model is None:
+            error_message = (
+                f"Your base model is configured as {base_model_id} but your open-webui does not have any matching model by that ID."
+            )
+            self.log.error(error_message)
+            await __event_emitter__(
+                {
+                    "type": "message",
+                    "data": {"content": error_message},
+                }
+            )
+            return
+
+        # Update conversation history with the new user message
         async with self.lock:
             if user_id not in self.conversation_history:
                 self.conversation_history[user_id] = {
                     "messages": [],
                     "timer_task": None,
                     "follow_up_count": 0,
-                    "system_prompt": "You are a helpful assistant.",
+                    "system_prompt": "",
                     "timer_version": 0,
                 }
             self.conversation_history[user_id]["messages"].append(
@@ -210,12 +302,32 @@ class Pipe:
             )
 
             # Retrieve and store system prompt using pop_system_message
-            system_prompt, filtered_messages = pop_system_message(
+            stored_system_prompt, filtered_messages = pop_system_message(
                 self.conversation_history[user_id]["messages"]
             )
-            if system_prompt:
-                self.conversation_history[user_id]["system_prompt"] = system_prompt
+            if stored_system_prompt:
+                self.conversation_history[user_id]["system_prompt"] = stored_system_prompt["content"]
                 self.conversation_history[user_id]["messages"] = filtered_messages
+                self.log.debug(
+                    f"Stored system prompt for user {user_id}: {self.conversation_history[user_id]['system_prompt']}"
+                )
+            else:
+                # If no system prompt in messages, determine based on model and Pipe configuration
+                if "system_prompt" in model and model["system_prompt"]:
+                    self.conversation_history[user_id]["system_prompt"] = model["system_prompt"]
+                    self.log.debug(
+                        f"Using system prompt from model '{base_model_id}': {model['system_prompt']}"
+                    )
+                elif self.valves.enable_follow_up_system_message:
+                    self.conversation_history[user_id]["system_prompt"] = self.valves.follow_up_system_message
+                    self.log.debug(
+                        f"Using Pipe's follow-up system prompt for user {user_id}: {self.valves.follow_up_system_message}"
+                    )
+                else:
+                    self.conversation_history[user_id]["system_prompt"] = "You are a helpful assistant."
+                    self.log.debug(
+                        f"No system prompt found for model '{base_model_id}'. Using default system prompt."
+                    )
 
             # Increment timer_version to invalidate old timers
             self.conversation_history[user_id]["timer_version"] += 1
@@ -227,12 +339,15 @@ class Pipe:
                     "role": "system",
                     "content": self.conversation_history[user_id]["system_prompt"],
                 }
-            ] + self.conversation_history[user_id]["messages"]
+            ] + [
+                msg for msg in self.conversation_history[user_id]["messages"]
+                if msg["role"] in ["user", "assistant"]
+            ]
 
         # Generate LLM response with full conversation history
         self.log.debug(f"Generating chat completion for user {user_id}.")
         llm_response = await self.call_llm(
-            base_model_id=base_model_id,
+            model=model,
             messages=conversation,
         )
 
@@ -347,25 +462,12 @@ class Pipe:
             f"Generating follow-up message for user {user_id} with instruction: {follow_up_instruction}"
         )
 
-        # Determine which system prompt to use based on the new boolean valve
-        if self.valves.enable_follow_up_system_message:
-            follow_up_system_prompt = self.valves.follow_up_system_message
-            self.log.debug(
-                f"Using follow-up system prompt for user {user_id}: {follow_up_system_prompt}"
-            )
-        else:
-            # If the follow-up system message is disabled, use a default system prompt
-            follow_up_system_prompt = "You are a helpful assistant."
-            self.log.debug(
-                f"Follow-up system message is disabled. Using default system prompt for user {user_id}: {follow_up_system_prompt}"
-            )
-
-        # Create a new list of messages including the follow-up instruction as a separate 'user' message
-        follow_up_messages = (
-            [{"role": "system", "content": follow_up_system_prompt}]
-            + self.conversation_history[user_id]["messages"]
-            + [{"role": "user", "content": follow_up_instruction}]
-        )
+        # Prepare the conversation without injecting another system prompt
+        # The system prompt is already included in the conversation history
+        follow_up_messages = [
+            msg for msg in conversation
+            if msg["role"] in ["user", "assistant"]
+        ] + [{"role": "user", "content": follow_up_instruction}]
 
         # Log the follow-up messages for debugging
         self.log.debug(
@@ -374,11 +476,16 @@ class Pipe:
 
         # Generate follow-up message with full conversation history
         follow_up_message = await self.call_llm(
-            base_model_id=base_model_id,
+            model={"id": base_model_id},
             messages=follow_up_messages,
         )
 
         if follow_up_message:
+            # Update conversation history with assistant's response
+            async with self.lock:
+                self.conversation_history[user_id]["messages"].append(
+                    {"role": "assistant", "content": follow_up_message}
+                )
             # Emit the follow-up message with a newline
             await __event_emitter__(
                 {
@@ -542,10 +649,11 @@ class Pipe:
             system_prompt, messages = pop_system_message(body.get("messages", []))
             user_message = get_last_user_message(messages)
             if user_message is None:
-                await self.emit_chat_response(
-                    __event_emitter__,
-                    user_id,
-                    "I didn't receive any message from you.\n",
+                await __event_emitter__(
+                    {
+                        "type": "message",
+                        "data": {"content": "I didn't receive any message from you.\n"},
+                    }
                 )
                 self.log.debug("No user message provided; emitting default response.")
                 return {"error": "No message provided for chat completion."}
@@ -555,19 +663,34 @@ class Pipe:
                 self.log.debug(f"[chat_completion] User ID: {user_id}")
                 self.log.debug(f"[chat_completion] System Prompt: {system_prompt}")
 
-            # Emit chat response
-            await self.emit_chat_response(__event_emitter__, user_id, user_message)
+            # Check for internal query detection
+            if self.valves.tag_prompt_detection in user_message:
+                self.log.debug(f"Detected tag prompt in user message for user {user_id}.")
+                # The user message is already appended to conversation_history
+                await self.handle_internal_query(__event_emitter__, user_id, user_message)
+                return {"status": "internal_request_handled"}
 
-            # Start or reset the follow-up timer after the initial response is emitted
-            if self.valves.enable_follow_up:
-                # Start or reset the follow-up timer
-                await self.emit_follow_up_with_status(__event_emitter__, user_id)
+            elif self.valves.title_prompt_detection in user_message:
+                self.log.debug(f"Detected title prompt in user message for user {user_id}.")
+                # The user message is already appended to conversation_history
+                await self.handle_internal_query(__event_emitter__, user_id, user_message)
+                return {"status": "internal_request_handled"}
 
-            return {"status": "success"}
+            else:
+                # Emit chat response as a regular user message
+                await self.emit_chat_response(__event_emitter__, user_id, user_message)
+
+                # Start or reset the follow-up timer after the initial response is emitted
+                if self.valves.enable_follow_up:
+                    # Start or reset the follow-up timer
+                    await self.emit_follow_up_with_status(__event_emitter__, user_id)
+
+                return {"status": "success"}
 
         except Exception as e:
             error_message = f"An error occurred: {str(e)}\n"
             if self.valves.enable_debug:
                 self.log.error(f"Error during chat completion: {e}")
+            # Handle error as a regular user message
             await self.emit_chat_response(__event_emitter__, user_id, error_message)
             return {"error": str(e)}
