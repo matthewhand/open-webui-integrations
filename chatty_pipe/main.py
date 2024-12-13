@@ -1,7 +1,7 @@
 """
 title: Chatty Pipe
 author: matthewh
-version: 0.1.0
+version: 0.2.0
 required_open_webui_version: 0.4.0
 
 Instructions:
@@ -16,9 +16,9 @@ Instructions:
 
 TODO
 - [x] Follow up feature.
-- [ ] Update status completion when interrupted by user
+- [ ] Status completion when interrupted by user
 - [ ] Don't error when base model has a system prompt
-- [ ] Reset conversation with __init__ so chats don't carry over (?)
+- [ ] Reset conversation with __init__
 """
 
 from typing import Optional, Callable, Awaitable, Dict, Any, List
@@ -53,7 +53,7 @@ class Pipe:
 
         # Valve to enable status emissions
         enable_status_emits: bool = Field(
-            default=False,
+            default=True,
             description="Enable or disable status message emissions.",
         )
 
@@ -112,8 +112,7 @@ class Pipe:
         self.conversation_history: Dict[str, Dict[str, Any]] = {}
         self.lock = asyncio.Lock()
 
-        # TODO: Reset conversation with __init__
-        # Ensuring that conversation_history is empty upon initialization
+        # Ensure that conversation_history is empty upon initialization
         self.conversation_history.clear()
         self.log.debug("Initialized Pipe with empty conversation history.")
 
