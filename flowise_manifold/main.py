@@ -1,7 +1,7 @@
 """
 title: Flowise Manifold, for connecting to external Flowise instance endpoint
 author: matthewh
-version: 2.2
+version: 3.0
 license: MIT
 required_open_webui_version: 0.4.4
 
@@ -10,9 +10,10 @@ TODO
 - [x] Upgrade to Manifold
  - [x] Static chatflow definitions
  - [x] Dynamic chatflow definitions
-- [x] LLM features
- - [x] Summarization
- - [x] Status updates
+- [x] Flowise Assistants
+- [ ] LLM features
+ - [ ] Summarization
+ - [ ] Status updates
 """
 
 import json
@@ -97,12 +98,13 @@ mock_user = User(
 FLOWISE_API_ENDPOINT_PLACEHOLDER = "YOUR_FLOWISE_API_ENDPOINT"
 FLOWISE_API_KEY_PLACEHOLDER = "YOUR_FLOWISE_API_KEY"
 FLOWISE_CHATFLOW_IDS_PLACEHOLDER = "YOUR_FLOWISE_CHATFLOW_IDS"
+FLOWISE_ASSISTANT_IDS_PLACEHOLDER = "YOUR_FLOWISE_ASSISTANT_IDS"  # NEW
 MANIFOLD_PREFIX_DEFAULT = "flowise/"
 
 
 class Pipe:
     """
-    The Pipe class manages interactions with Flowise APIs, including dynamic and static chatflow retrieval,
+    The Pipe class manages interactions with Flowise APIs, including dynamic and static chatflow and assistant retrieval,
     model registration with a manifold prefix, handling requests with internal retry logic,
     integrating summarization, and managing status updates.
     """
@@ -119,7 +121,7 @@ class Pipe:
         )
         flowise_api_key: str = Field(
             default=FLOWISE_API_KEY_PLACEHOLDER,
-            description="API key for Flowise. Required for dynamic chatflow retrieval.",
+            description="API key for Flowise. Required for dynamic chatflow and assistant retrieval.",
         )
         use_dynamic_chatflows: bool = Field(
             default=False,  # Disabled by default
@@ -133,6 +135,19 @@ class Pipe:
             default=FLOWISE_CHATFLOW_IDS_PLACEHOLDER,
             description="Comma-separated 'Name:ID' pairs for static chatflows.",
         )
+        # NEW: Assistants Configuration
+        use_dynamic_assistants: bool = Field(
+            default=False,  # Disabled by default
+            description="Enable dynamic retrieval of assistants. Requires valid API key.",  # NEW
+        )
+        use_static_assistants: bool = Field(
+            default=False,  # Disabled by default
+            description="Enable static retrieval of assistants from 'flowise_assistant_ids'.",  # NEW
+        )
+        flowise_assistant_ids: str = Field(
+            default=FLOWISE_ASSISTANT_IDS_PLACEHOLDER,
+            description="Comma-separated 'Name:ID' pairs for static assistants.",  # NEW
+        )
         manifold_prefix: str = Field(
             default=MANIFOLD_PREFIX_DEFAULT,
             description="Prefix used for Flowise models.",
@@ -142,41 +157,45 @@ class Pipe:
             default="(wip|dev|offline|broken)",  # Added parentheses for grouping
             description="Regex to exclude certain chatflows by name.",
         )
+        assistant_blacklist: str = Field(
+            default="(wip|dev|offline|broken)",  # NEW: Separate blacklist for assistants
+            description="Regex to exclude certain assistants by name.",  # NEW
+        )
 
         # Summarization Configuration
         enable_summarization: bool = Field(
             default=False,
-            description="Enable chat history summarization.",
+            description="(WIP) Enable chat history summarization.",
         )
         summarization_output: bool = Field(
             default=False,
-            description="Output summarization to user using collapsible UI element.",
+            description="(WIP) Output summarization to user using collapsible UI element.",
         )
         summarization_model_id: str = Field(
             default="",
-            description="Model ID for summarization tasks.",
+            description="(WIP) Model ID for summarization tasks.",
         )
         summarization_system_prompt: str = Field(
             default="Provide a concise summary of user and assistant messages separately.",
-            description="System prompt for summarization.",
+            description="(WIP) System prompt for summarization.",
         )
 
         # Status Updates
         enable_llm_status_updates: bool = Field(
             default=False,
-            description="Enable LLM-generated status updates. If false, uses static messages.",
+            description="(WIP) Enable LLM-generated status updates. If false, uses static messages.",
         )
         llm_status_update_model_id: str = Field(
             default="",
-            description="Model ID for LLM-based status updates.",
+            description="(WIP) Model ID for LLM-based status updates.",
         )
         llm_status_update_prompt: str = Field(
             default="Acknowledge the user's patience waiting for: {last_request}",
-            description="System prompt for LLM status updates. {last_request} replaced at runtime.",
+            description="(WIP) System prompt for LLM status updates. {last_request} replaced at runtime.",
         )
         llm_status_update_frequency: int = Field(
             default=5,
-            description="Emit LLM-based status updates every Nth interval.",
+            description="(WIP) Emit LLM-based status updates every Nth interval.",
         )
         static_status_messages: List[str] = Field(
             default=[
@@ -277,8 +296,10 @@ class Pipe:
         finally:
             self.log_debug("[INIT] Finished logging valve configurations.")
 
-        # Chatflows will be loaded in pipes()
-        self.log_debug("[INIT] Chatflows will be loaded in pipes() method.")
+        # Chatflows and Assistants will be loaded in pipes()
+        self.log_debug(
+            "[INIT] Chatflows and Assistants will be loaded in pipes() method."
+        )
 
         self.log_debug("[INIT] Pipe initialization complete.")
 
@@ -329,21 +350,71 @@ class Pipe:
         self.log_debug("[is_static_config_ok] Static chatflow configuration is valid.")
         return True
 
+    # NEW: Check if dynamic assistant configuration is valid
+    def is_dynamic_assistants_config_ok(self) -> bool:
+        """Check if dynamic assistant configuration is valid."""
+        self.log_debug(
+            "[is_dynamic_assistants_config_ok] Checking dynamic assistant configuration."
+        )
+        if not self.valves.use_dynamic_assistants:
+            self.log_debug(
+                "[is_dynamic_assistants_config_ok] Dynamic assistants disabled."
+            )
+            return False
+        if (
+            not self.valves.flowise_api_key
+            or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
+        ):
+            self.log_error(
+                "[is_dynamic_assistants_config_ok] Dynamic assistants enabled but API key missing/placeholder."
+            )
+            return False
+        self.log_debug(
+            "[is_dynamic_assistants_config_ok] Dynamic assistant configuration is valid."
+        )
+        return True
+
+    # NEW: Check if static assistant configuration is valid
+    def is_static_assistants_config_ok(self) -> bool:
+        """Check if static assistant configuration is valid."""
+        self.log_debug(
+            "[is_static_assistants_config_ok] Checking static assistant configuration."
+        )
+        if not self.valves.use_static_assistants:
+            self.log_debug(
+                "[is_static_assistants_config_ok] Static assistants disabled."
+            )
+            return False
+        if (
+            not self.valves.flowise_assistant_ids
+            or self.valves.flowise_assistant_ids == FLOWISE_ASSISTANT_IDS_PLACEHOLDER
+        ):
+            self.log_error(
+                "[is_static_assistants_config_ok] Static assistants enabled but config empty/placeholder."
+            )
+            return False
+        self.log_debug(
+            "[is_static_assistants_config_ok] Static assistant configuration is valid."
+        )
+        return True
+
     def load_chatflows(self) -> Dict[str, str]:
         """
-        Load dynamic and static chatflows based on configuration.
+        Load dynamic and static chatflows and assistants based on configuration.
         Returns:
-            Dict[str, str]: Loaded chatflows with names as keys and IDs as values.
+            Dict[str, str]: Loaded models with names as keys and IDs as values.
         """
-        self.log_debug("[load_chatflows] Starting chatflow loading process.")
-        loaded_chatflows = {}
+        self.log_debug(
+            "[load_chatflows] Starting chatflow and assistant loading process."
+        )
+        loaded_models = {}
 
         try:
             # Load static chatflows if enabled
             if self.valves.use_static_chatflows and self.is_static_config_ok():
                 self.log_debug("[load_chatflows] Loading static chatflows.")
                 static_chatflows = self.load_static_chatflows()
-                loaded_chatflows.update(static_chatflows)
+                loaded_models.update(static_chatflows)
                 self.log_debug(
                     f"[load_chatflows] Loaded static chatflows: {static_chatflows}"
                 )
@@ -357,7 +428,7 @@ class Pipe:
             if self.valves.use_dynamic_chatflows and self.is_dynamic_config_ok():
                 self.log_debug("[load_chatflows] Loading dynamic chatflows.")
                 dynamic_chatflows = self.load_dynamic_chatflows()
-                loaded_chatflows.update(dynamic_chatflows)
+                loaded_models.update(dynamic_chatflows)
                 self.log_debug(
                     f"[load_chatflows] Loaded dynamic chatflows: {dynamic_chatflows}"
                 )
@@ -367,17 +438,53 @@ class Pipe:
                         "[load_chatflows] Dynamic chatflows enabled but configuration invalid. Skipping dynamic loading."
                     )
 
+            # NEW: Load static assistants if enabled
+            if (
+                self.valves.use_static_assistants
+                and self.is_static_assistants_config_ok()
+            ):
+                self.log_debug("[load_chatflows] Loading static assistants.")
+                static_assistants = self.load_static_assistants()
+                loaded_models.update(static_assistants)
+                self.log_debug(
+                    f"[load_chatflows] Loaded static assistants: {static_assistants}"
+                )
+            else:
+                if self.valves.use_static_assistants:
+                    self.log_debug(
+                        "[load_chatflows] Static assistants enabled but configuration invalid. Skipping static loading."
+                    )
+
+            # NEW: Load dynamic assistants if enabled
+            if (
+                self.valves.use_dynamic_assistants
+                and self.is_dynamic_assistants_config_ok()
+            ):
+                self.log_debug("[load_chatflows] Loading dynamic assistants.")
+                dynamic_assistants = self.load_dynamic_assistants()
+                loaded_models.update(dynamic_assistants)
+                self.log_debug(
+                    f"[load_chatflows] Loaded dynamic assistants: {dynamic_assistants}"
+                )
+            else:
+                if self.valves.use_dynamic_assistants:
+                    self.log_debug(
+                        "[load_chatflows] Dynamic assistants enabled but configuration invalid. Skipping dynamic loading."
+                    )
+
             # Update self.chatflows
-            self.chatflows = loaded_chatflows
-            self.log_debug(f"[load_chatflows] Final loaded chatflows: {self.chatflows}")
+            self.chatflows = loaded_models
+            self.log_debug(f"[load_chatflows] Final loaded models: {self.chatflows}")
 
             return self.chatflows
 
         except Exception as e:
             self.log_error(f"[load_chatflows] Unexpected error: {e}", exc_info=True)
-            return loaded_chatflows
+            return loaded_models
         finally:
-            self.log_debug("[load_chatflows] Completed chatflow loading process.")
+            self.log_debug(
+                "[load_chatflows] Completed chatflow and assistant loading process."
+            )
 
     def load_dynamic_chatflows(
         self, retries: int = 3, delay: int = 5
@@ -515,6 +622,144 @@ class Pipe:
 
         return dynamic_chatflows
 
+    def load_dynamic_assistants(
+        self, retries: int = 3, delay: int = 5
+    ) -> Dict[str, str]:
+        """
+        Load assistants dynamically using the Flowise API, with enhanced debugging and retry logic.
+
+        Args:
+            retries (int): Number of retry attempts in case of failure.
+            delay (int): Delay in seconds between retries.
+
+        Returns:
+            Dict[str, str]: Loaded dynamic assistants.
+        """
+        dynamic_assistants = {}
+        try:
+            self.log_debug(
+                "[load_dynamic_assistants] Starting dynamic assistant retrieval."
+            )
+
+            endpoint = (
+                f"{self.valves.flowise_api_endpoint.rstrip('/')}/api/v1/assistants"
+            )
+            headers = {"Authorization": f"Bearer {self.valves.flowise_api_key}"}
+
+            self.log_debug(f"[load_dynamic_assistants] Endpoint: {endpoint}")
+            self.log_debug(f"[load_dynamic_assistants] Headers: {headers}")
+
+            for attempt in range(1, retries + 1):
+                try:
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Attempt {attempt} to retrieve assistants."
+                    )
+                    response = requests.get(
+                        endpoint,
+                        headers=headers,
+                        timeout=self.valves.chatflow_load_timeout,  # Reuse chatflow_load_timeout
+                    )
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Response status: {response.status_code}"
+                    )
+                    raw_response = response.text
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Raw response: {raw_response}"
+                    )
+
+                    if response.status_code != 200:
+                        self.log_error(
+                            f"[load_dynamic_assistants] API call failed with status: {response.status_code}."
+                        )
+                        raise ValueError(f"HTTP {response.status_code}: {raw_response}")
+
+                    data = json.loads(raw_response)
+                    self.log_debug(f"[load_dynamic_assistants] Parsed data: {data}")
+
+                    for assistant in data:
+                        details = json.loads(assistant.get("details", "{}"))
+                        name = details.get("name", "").strip()
+                        aid = assistant.get("id", "").strip()
+
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Processing assistant: name='{name}', id='{aid}'"
+                        )
+
+                        if not name or not aid:
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Skipping invalid entry: {assistant}"
+                            )
+                            continue
+
+                        # Apply assistant blacklist regex
+                        if re.search(
+                            self.valves.assistant_blacklist, name, re.IGNORECASE
+                        ):
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Assistant '{name}' is blacklisted. Skipping."
+                            )
+                            continue
+
+                        # Sanitize name
+                        sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Sanitized name: '{sanitized_name}'"
+                        )
+
+                        if sanitized_name in dynamic_assistants:
+                            base_name = sanitized_name
+                            suffix = 1
+                            while sanitized_name in dynamic_assistants:
+                                sanitized_name = f"{base_name}_{suffix}"
+                                suffix += 1
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Resolved duplicate name: '{name}' -> '{sanitized_name}'"
+                            )
+
+                        dynamic_assistants[sanitized_name] = aid
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Added dynamic assistant: '{sanitized_name}': '{aid}'"
+                        )
+
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Successfully loaded dynamic assistants: {dynamic_assistants}"
+                    )
+                    return dynamic_assistants  # Exit successfully after loading
+
+                except (requests.RequestException, ValueError) as e:
+                    self.log_error(
+                        f"[load_dynamic_assistants] Attempt {attempt} failed: {e}",
+                        exc_info=True,
+                    )
+                    if attempt < retries:
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        self.log_error(
+                            "[load_dynamic_assistants] All retry attempts failed."
+                        )
+                        self.flowise_available = False
+                except Exception as e:
+                    self.log_error(
+                        f"[load_dynamic_assistants] Unexpected error: {e}",
+                        exc_info=True,
+                    )
+                    self.flowise_available = False
+                    break
+        except Exception as e:
+            self.log_error(
+                f"[load_dynamic_assistants] Fatal error during dynamic assistant retrieval: {e}",
+                exc_info=True,
+            )
+        finally:
+            self.log_debug(
+                "[load_dynamic_assistants] Completed dynamic assistant retrieval process."
+            )
+
+        return dynamic_assistants
+
     def load_static_chatflows(self) -> Dict[str, str]:
         """
         Synchronously loads static chatflows and updates self.chatflows.
@@ -603,30 +848,264 @@ class Pipe:
                 "[load_static_chatflows] Finished static chatflow retrieval."
             )
 
-    def pipes(self) -> List[dict]:
+    # NEW: Load static assistants
+    def load_static_assistants(self) -> Dict[str, str]:
         """
-        Register all available chatflows, adding the setup pipe if no chatflows are available.
+        Synchronously loads static assistants and updates self.chatflows.
 
         Returns:
-            List[dict]: A list of chatflow models with their IDs and names.
+            Dict[str, str]: Loaded static assistants.
+        """
+        static_assistants = {}
+        try:
+            self.log_debug(
+                "[load_static_assistants] Starting static assistant retrieval."
+            )
+
+            pairs = [
+                pair.strip()
+                for pair in self.valves.flowise_assistant_ids.split(",")
+                if ":" in pair
+            ]
+            self.log_debug(f"[load_static_assistants] Extracted pairs: {pairs}")
+
+            for pair in pairs:
+                try:
+                    name, assistant_id = map(str.strip, pair.split(":", 1))
+                    self.log_debug(
+                        f"[load_static_assistants] Processing pair: name='{name}', id='{assistant_id}'"
+                    )
+
+                    if not name or not assistant_id:
+                        self.log_debug(
+                            f"[load_static_assistants] Skipping invalid pair: '{pair}'"
+                        )
+                        continue
+
+                    # Validate assistant_id
+                    if not re.match(r"^[a-zA-Z0-9_-]+$", assistant_id):
+                        self.log_debug(
+                            f"[load_static_assistants] Invalid assistant_id '{assistant_id}' for pair '{pair}'. Skipping."
+                        )
+                        continue
+
+                    # Apply assistant blacklist regex
+                    if re.search(self.valves.assistant_blacklist, name, re.IGNORECASE):
+                        self.log_debug(
+                            f"[load_static_assistants] Assistant '{name}' is blacklisted. Skipping."
+                        )
+                        continue
+
+                    # Sanitize name
+                    sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+                    self.log_debug(
+                        f"[load_static_assistants] Sanitized name: '{sanitized_name}'"
+                    )
+
+                    if sanitized_name in static_assistants:
+                        base_name = sanitized_name
+                        suffix = 1
+                        while sanitized_name in static_assistants:
+                            sanitized_name = f"{base_name}_{suffix}"
+                            suffix += 1
+                        self.log_debug(
+                            f"[load_static_assistants] Resolved duplicate name: '{name}' -> '{sanitized_name}'"
+                        )
+
+                    static_assistants[sanitized_name] = assistant_id
+                    self.log_debug(
+                        f"[load_static_assistants] Added static assistant: '{sanitized_name}': '{assistant_id}'"
+                    )
+
+                except ValueError as ve:
+                    self.log_error(
+                        f"[load_static_assistants] Error parsing pair '{pair}': {ve}",
+                        exc_info=True,
+                    )
+                except Exception as e:
+                    self.log_error(
+                        f"[load_static_assistants] Unexpected error processing pair '{pair}': {e}",
+                        exc_info=True,
+                    )
+
+            self.log_debug(
+                f"[load_static_assistants] Successfully loaded static assistants: {static_assistants}"
+            )
+            return static_assistants
+
+        except Exception as e:
+            self.log_error(
+                f"[load_static_assistants] Unexpected error during static assistant loading: {e}",
+                exc_info=True,
+            )
+            return static_assistants
+        finally:
+            self.log_debug(
+                "[load_static_assistants] Finished static assistant retrieval."
+            )
+
+    def load_dynamic_assistants(
+        self, retries: int = 3, delay: int = 5
+    ) -> Dict[str, str]:
+        """
+        Load assistants dynamically using the Flowise API, with enhanced debugging and retry logic.
+
+        Args:
+            retries (int): Number of retry attempts in case of failure.
+            delay (int): Delay in seconds between retries.
+
+        Returns:
+            Dict[str, str]: Loaded dynamic assistants.
+        """
+        dynamic_assistants = {}
+        try:
+            self.log_debug(
+                "[load_dynamic_assistants] Starting dynamic assistant retrieval."
+            )
+
+            endpoint = (
+                f"{self.valves.flowise_api_endpoint.rstrip('/')}/api/v1/assistants"
+            )
+            headers = {"Authorization": f"Bearer {self.valves.flowise_api_key}"}
+
+            self.log_debug(f"[load_dynamic_assistants] Endpoint: {endpoint}")
+            self.log_debug(f"[load_dynamic_assistants] Headers: {headers}")
+
+            for attempt in range(1, retries + 1):
+                try:
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Attempt {attempt} to retrieve assistants."
+                    )
+                    response = requests.get(
+                        endpoint,
+                        headers=headers,
+                        timeout=self.valves.chatflow_load_timeout,  # Reuse chatflow_load_timeout
+                    )
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Response status: {response.status_code}"
+                    )
+                    raw_response = response.text
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Raw response: {raw_response}"
+                    )
+
+                    if response.status_code != 200:
+                        self.log_error(
+                            f"[load_dynamic_assistants] API call failed with status: {response.status_code}."
+                        )
+                        raise ValueError(f"HTTP {response.status_code}: {raw_response}")
+
+                    data = json.loads(raw_response)
+                    self.log_debug(f"[load_dynamic_assistants] Parsed data: {data}")
+
+                    for assistant in data:
+                        details = json.loads(assistant.get("details", "{}"))
+                        name = details.get("name", "").strip()
+                        aid = assistant.get("id", "").strip()
+
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Processing assistant: name='{name}', id='{aid}'"
+                        )
+
+                        if not name or not aid:
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Skipping invalid entry: {assistant}"
+                            )
+                            continue
+
+                        # Apply assistant blacklist regex
+                        if re.search(
+                            self.valves.assistant_blacklist, name, re.IGNORECASE
+                        ):
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Assistant '{name}' is blacklisted. Skipping."
+                            )
+                            continue
+
+                        # Sanitize name
+                        sanitized_name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Sanitized name: '{sanitized_name}'"
+                        )
+
+                        if sanitized_name in dynamic_assistants:
+                            base_name = sanitized_name
+                            suffix = 1
+                            while sanitized_name in dynamic_assistants:
+                                sanitized_name = f"{base_name}_{suffix}"
+                                suffix += 1
+                            self.log_debug(
+                                f"[load_dynamic_assistants] Resolved duplicate name: '{name}' -> '{sanitized_name}'"
+                            )
+
+                        dynamic_assistants[sanitized_name] = aid
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Added dynamic assistant: '{sanitized_name}': '{aid}'"
+                        )
+
+                    self.log_debug(
+                        f"[load_dynamic_assistants] Successfully loaded dynamic assistants: {dynamic_assistants}"
+                    )
+                    return dynamic_assistants  # Exit successfully after loading
+
+                except (requests.RequestException, ValueError) as e:
+                    self.log_error(
+                        f"[load_dynamic_assistants] Attempt {attempt} failed: {e}",
+                        exc_info=True,
+                    )
+                    if attempt < retries:
+                        self.log_debug(
+                            f"[load_dynamic_assistants] Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        self.log_error(
+                            "[load_dynamic_assistants] All retry attempts failed."
+                        )
+                        self.flowise_available = False
+                except Exception as e:
+                    self.log_error(
+                        f"[load_dynamic_assistants] Unexpected error: {e}",
+                        exc_info=True,
+                    )
+                    self.flowise_available = False
+                    break
+        except Exception as e:
+            self.log_error(
+                f"[load_dynamic_assistants] Fatal error during dynamic assistant retrieval: {e}",
+                exc_info=True,
+            )
+        finally:
+            self.log_debug(
+                "[load_dynamic_assistants] Completed dynamic assistant retrieval process."
+            )
+
+        return dynamic_assistants
+
+    def pipes(self) -> List[dict]:
+        """
+        Register all available chatflows and assistants, adding the setup pipe if no models are available.
+
+        Returns:
+            List[dict]: A list of models with their IDs and names.
         """
         self.log_debug("[pipes] Starting model registration.")
         models = []
 
         try:
-            # Load chatflows based on configuration
+            # Load models (chatflows and assistants) based on configuration
             self.load_chatflows()
 
-            # If no chatflows are available after loading, add the setup pipe
+            # If no models are available after loading, add the setup pipe
             if not self.chatflows:
                 self.log_debug(
-                    "[pipes] No chatflows available after loading. Registering 'Flowise Setup' pipe."
+                    "[pipes] No models available after loading. Registering 'Flowise Setup' pipe."
                 )
                 self.register_flowise_setup_pipe()
 
-            # Register all chatflows as models
+            # Register all models as entries
             models = [{"id": name, "name": name} for name in self.chatflows.keys()]
-            self.log_debug(f"[pipes] Registered chatflow models: {models}")
+            self.log_debug(f"[pipes] Registered models: {models}")
             return models
 
         except Exception as e:
@@ -642,13 +1121,13 @@ class Pipe:
         """
         Register the 'Flowise Setup' pipe to emit advisory instructions.
 
-        This pipe is used when no chatflows are configured correctly.
+        This pipe is used when no models are configured correctly.
         """
         advisory_message = (
             "Flowise Setup Required:\n\n"
-            "No chatflows are currently registered. Please configure chatflows by:\n"
-            "1. Enabling dynamic chatflows with a valid Flowise API key.\n"
-            "2. Enabling static chatflows by providing 'Name:ID' pairs in 'flowise_chatflow_ids'.\n\n"
+            "No chatflows or assistants are currently registered. Please configure them by:\n"
+            "1. Enabling dynamic retrieval with a valid Flowise API key.\n"
+            "2. Enabling static retrieval by providing 'Name:ID' pairs in 'flowise_chatflow_ids' and/or 'flowise_assistant_ids'.\n\n"
             "Ensure that the Flowise API endpoint is correctly configured in 'flowise_api_endpoint'."
         )
         self.chatflows["Flowise Setup"] = "flowise_setup_pipe_id"
@@ -658,12 +1137,12 @@ class Pipe:
 
     def get_chatflows(self) -> Dict[str, str]:
         """
-        Retrieve all available chatflows.
+        Retrieve all available chatflows and assistants.
 
         Returns:
-            Dict[str, str]: A dictionary mapping chatflow names to IDs.
+            Dict[str, str]: A dictionary mapping model names to IDs.
         """
-        self.log_debug("[get_chatflows] Retrieving all available chatflows.")
+        self.log_debug("[get_chatflows] Retrieving all available models.")
         return self.chatflows.copy()
 
     def pipe(
@@ -673,7 +1152,7 @@ class Pipe:
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
     ) -> Union[Dict[str, Any], Dict[str, str]]:
         """
-        Processes a user request by selecting the appropriate chatflow or the setup pipe.
+        Processes a user request by selecting the appropriate model (chatflow or assistant) or the setup pipe.
 
         Args:
             body (dict): The incoming request payload.
@@ -714,26 +1193,26 @@ class Pipe:
             model_name = sanitized_model_name
             self.log_debug(f"[pipe] Final model name after processing: '{model_name}'")
 
-            # Look up the chatflow ID
-            chatflow_id = self.chatflows.get(model_name)
-            if chatflow_id:
+            # Look up the model ID
+            model_id = self.chatflows.get(model_name)
+            if model_id:
                 self.log_debug(
-                    f"[pipe] Found chatflow ID '{chatflow_id}' for model name '{model_name}'."
+                    f"[pipe] Found model ID '{model_id}' for model name '{model_name}'."
                 )
             else:
                 self.log_debug(
-                    f"[pipe] No chatflow found for model name '{model_name}'. Assuming 'Flowise Setup' pipe."
+                    f"[pipe] No model found for name '{model_name}'. Assuming 'Flowise Setup' pipe."
                 )
                 model_name = "Flowise Setup"
-                chatflow_id = self.chatflows.get(model_name)
+                model_id = self.chatflows.get(model_name)
 
             # Handle setup pipe
             if model_name == "Flowise Setup":
                 advisory_message = (
                     "Flowise Setup Required:\n\n"
-                    "No chatflows are currently registered. Please configure chatflows by:\n"
-                    "1. Enabling dynamic chatflows with a valid Flowise API key.\n"
-                    "2. Enabling static chatflows by providing 'Name:ID' pairs in 'flowise_chatflow_ids'.\n\n"
+                    "No chatflows or assistants are currently registered. Please configure them by:\n"
+                    "1. Enabling dynamic retrieval with a valid Flowise API key.\n"
+                    "2. Enabling static retrieval by providing 'Name:ID' pairs in 'flowise_chatflow_ids' and/or 'flowise_assistant_ids'.\n\n"
                     "Ensure that the Flowise API endpoint is correctly configured in 'flowise_api_endpoint'."
                 )
                 self.log_debug(f"[pipe] Advisory message: {advisory_message}")
@@ -743,18 +1222,16 @@ class Pipe:
                     )
                 return {"status": "setup", "message": advisory_message}
 
-            # At this point, chatflow_id should be valid
-            if not chatflow_id:
-                error_message = f"No chatflow found for model '{model_name}'."
+            # At this point, model_id should be valid
+            if not model_id:
+                error_message = f"No model found for name '{model_name}'."
                 self.log_error(f"[pipe] {error_message}")
                 if __event_emitter__:
                     self.emit_status_sync(__event_emitter__, error_message, done=True)
                 return {"status": "error", "message": error_message}
 
-            # Process the request using the selected chatflow
-            self.log_debug(
-                f"[pipe] Using chatflow '{model_name}' with ID '{chatflow_id}'"
-            )
+            # Process the request using the selected model
+            self.log_debug(f"[pipe] Using model '{model_name}' with ID '{model_id}'")
             messages = body.get("messages", [])
             if not messages:
                 error_message = "No messages found in the request."
@@ -771,7 +1248,7 @@ class Pipe:
 
             combined_prompt = self._get_combined_prompt(user_messages)
             self.log_debug(
-                f"[pipe] Combined prompt for chatflow '{model_name}':\n{combined_prompt}"
+                f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt}"
             )
 
             # Emit initial status: Processing the request
@@ -1120,7 +1597,7 @@ class Pipe:
 
             self.log_debug(f"[handle_flowise_request] Final payload: {payload}")
 
-            # Determine chatflow to use
+            # Determine model to use
             if not chatflow_name or chatflow_name not in self.chatflows:
                 if self.chatflows:
                     chatflow_name = list(self.chatflows.keys())[0]
@@ -1128,7 +1605,7 @@ class Pipe:
                         f"[handle_flowise_request] No or invalid chatflow_name provided. Using '{chatflow_name}'."
                     )
                 else:
-                    error_message = "No chatflows configured."
+                    error_message = "No chatflows or assistants configured."
                     self.log_debug(f"[handle_flowise_request] {error_message}")
                     if __event_emitter__:
                         self.emit_status_sync(
@@ -1136,13 +1613,11 @@ class Pipe:
                         )
                     return {"error": error_message}
 
-            chatflow_id = self.chatflows[chatflow_name]
-            self.log_debug(
-                f"[handle_flowise_request] Selected chatflow ID: {chatflow_id}"
-            )
+            model_id = self.chatflows[chatflow_name]
+            self.log_debug(f"[handle_flowise_request] Selected model ID: {model_id}")
 
             endpoint = self.valves.flowise_api_endpoint.rstrip("/")
-            url = f"{endpoint}/api/v1/prediction/{chatflow_id}"
+            url = f"{endpoint}/api/v1/prediction/{model_id}"
             headers = {
                 "Content-Type": "application/json",
             }
@@ -1301,162 +1776,3 @@ class Pipe:
             return "Unknown time"
         finally:
             self.log_debug("[format_elapsed_time] Finished formatting elapsed time.")
-
-    # # Example Mock Event Emitters for Testing
-    # def mock_sync_event_emitter(event):
-    #     print("Synchronous Event Emitted:", event)
-
-    # async def mock_async_event_emitter(event):
-    #     print("Asynchronous Event Emitted:", event)
-
-    # # Example Usage and Testing
-    # if __name__ == "__main__":
-    #     import asyncio
-
-    #     # Initialize the Pipe with valid static chatflows and LLM features enabled
-    #     valves = Pipe.Valves(
-    #         flowise_api_endpoint="http://host.docker.internal:3031/",
-    #         flowise_api_key="VALID_FLOWISE_API_KEY",  # Replace with actual key or mock
-    #         use_dynamic_chatflows=False,  # Dynamic chatflows disabled
-    #         use_static_chatflows=True,
-    #         flowise_chatflow_ids="owuiDocs:e209c6f0-24bc-45e3-b7cd-ee88df6096e1",
-    #         manifold_prefix="flowise_manifold.",  # Set to 'flowise_manifold.' as per requirement
-    #         enable_debug=True,
-    #         enable_llm_status_updates=True,  # Enable LLM status updates
-    #         llm_status_update_model_id="your-llm-status-model-id",  # Replace with actual model ID
-    #         enable_summarization=True,  # Enable summarization
-    #         summarization_model_id="your-summarization-model-id",  # Replace with actual summarization model ID
-    #         summarization_system_prompt="Provide a concise summary of the conversation.",
-    #         summarization_output=True,  # Enable emitting summaries as collapsible messages
-    #         # Add any additional configurations as needed
-    #     )
-
-    #     pipe = Pipe(valves=valves)
-
-    #     # Register chatflows
-    #     pipe.pipes()
-
-    #     # Define the request body with a valid model
-    #     body_valid = {
-    #         "model": "flowise_manifold.owuiDocs",
-    #         "messages": [
-    #             {"role": "user", "content": "Hi"},
-    #             {"role": "assistant", "content": "Hello! How can I assist you today?"},
-    #             {"role": "user", "content": "Tell me a joke."},
-    #         ],
-    #     }
-
-    #     # Define the request body with an invalid model
-    #     body_invalid = {
-    #         "model": "flowise_manifold.unknownChatflow",
-    #         "messages": [{"role": "user", "content": "Hi"}],
-    #     }
-
-    #     # Define the request body with special characters in model name
-    #     body_special_chars = {
-    #         "model": "flowise_manifold.owuiDocs!@#",
-    #         "messages": [{"role": "user", "content": "Tell me a joke."}],
-    #     }
-
-    #     # Define the request body with no messages
-    #     body_no_messages = {"model": "flowise_manifold.owuiDocs", "messages": []}
-
-    #     # Function to simulate sequential requests to accumulate chat history
-    #     def simulate_conversation(pipe_instance, emitter):
-    #         print("\n--- Simulating Conversation with Sequential Requests ---")
-
-    #         # First message
-    #         response2 = pipe_instance.pipe(
-    #             body={
-    #                 "model": "flowise_manifold.owuiDocs",
-    #                 "messages": [{"role": "user", "content": "Hi"}],
-    #             },
-    #             __user__={"user_id": "default_user"},
-    #             __event_emitter__=emitter,
-    #         )
-    #         print("Pipe Response 2:", response1)
-
-    #         # Second message
-    #         response3 = pipe_instance.pipe(
-    #             body={
-    #                 "model": "flowise_manifold.owuiDocs",
-    #                 "messages": [{"role": "user", "content": "Can you help me with Flowise?"}],
-    #             },
-    #             __user__={"user_id": "default_user"},
-    #             __event_emitter__=emitter,
-    #         )
-    #         print("Pipe Response 3:", response2)
-
-    #         # Third message
-    #         response4 = pipe_instance.pipe(
-    #             body={
-    #                 "model": "flowise_manifold.owuiDocs",
-    #                 "messages": [{"role": "user", "content": "Tell me a joke."}],
-    #             },
-    #             __user__={"user_id": "default_user"},
-    #             __event_emitter__=emitter,
-    #         )
-    #         print("Pipe Response 4:", response3)
-
-    #         # Fourth message to trigger summarization and status update
-    #         response5 = pipe_instance.pipe(
-    #             body={
-    #                 "model": "flowise_manifold.owuiDocs",
-    #                 "messages": [{"role": "user", "content": "Thanks for the help!"}],
-    #             },
-    #             __user__={"user_id": "default_user"},
-    #             __event_emitter__=emitter,
-    #         )
-    #         print("Pipe Response 5:", response4)
-
-    #     # Test with synchronous event emitter (Valid Model)
-    #     print("\n--- Testing with Synchronous Event Emitter (Valid Model) ---")
-    #     response_sync = pipe.pipe(
-    #         body=body_valid,
-    #         __user__={"user_id": "default_user"},
-    #         __event_emitter__=pipe.mock_sync_event_emitter,
-    #     )
-    #     print("Pipe Response (Sync):", response_sync)
-
-    #     # Test with asynchronous event emitter (Valid Model)
-    #     print("\n--- Testing with Asynchronous Event Emitter (Valid Model) ---")
-
-    #     async def test_async_emitter():
-    #         response_async = pipe.pipe(
-    #             body=body_valid,
-    #             __user__={"user_id": "default_user"},
-    #             __event_emitter__=pipe.mock_async_event_emitter,
-    #         )
-    #         print("Pipe Response (Async):", response_async)
-
-    #     asyncio.run(test_async_emitter())
-
-    #     # Simulate a conversation to accumulate chat history
-    #     simulate_conversation(pipe, pipe.mock_sync_event_emitter)
-
-    #     # Test with invalid model
-    #     print("\n--- Testing with Invalid Model ---")
-    #     response_invalid = pipe.pipe(
-    #         body=body_invalid,
-    #         __user__={"user_id": "default_user"},
-    #         __event_emitter__=pipe.mock_sync_event_emitter,
-    #     )
-    #     print("Pipe Response (Invalid Model):", response_invalid)
-
-    #     # Test with special characters in model name
-    #     print("\n--- Testing with Special Characters in Model Name ---")
-    #     response_special = pipe.pipe(
-    #         body=body_special_chars,
-    #         __user__={"user_id": "default_user"},
-    #         __event_emitter__=pipe.mock_sync_event_emitter,
-    #     )
-    #     print("Pipe Response (Special Characters):", response_special)
-
-    #     # Test with no messages
-    #     print("\n--- Testing with No Messages ---")
-    #     response_no_messages = pipe.pipe(
-    #         body=body_no_messages,
-    #         __user__={"user_id": "default_user"},
-    #         __event_emitter__=pipe.mock_sync_event_emitter,
-    #     )
-    #     print("Pipe Response (No Messages):", response_no_messages)
