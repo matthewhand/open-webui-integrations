@@ -135,7 +135,7 @@ class Pipe:
 
         # Flowise Connection
         flowise_api_endpoint: str = Field(
-            default="http://host.docker.internal:3030/",
+            default=FLOWISE_API_ENDPOINT_PLACEHOLDER,
             description="Base URL for the Flowise API endpoint.",
         )
         flowise_api_key: str = Field(
@@ -376,9 +376,6 @@ class Pipe:
             self.log_error(f"[emit_citation] Error emitting citation: {e}", exc_info=True)
         finally:
             self.log_debug("[emit_citation] Finished emitting citation.")
-
-    # Existing methods (Valves, load_chatflows, load_static_models, load_dynamic_models, pipes, register_flowise_setup_pipe, get_chatflows, get_last_user_message, call_llm, generate_summary, generate_status_update, handle_flowise_request, clean_response_text, _get_combined_prompt, reset_state, emit_status_sync, emit_output_sync, pipe)
-    # Ensure that each method contains proper try/catch/finally blocks as demonstrated above.
 
     def is_dynamic_config_ok(self) -> bool:
         """Check if dynamic chatflow configuration is valid."""
@@ -1114,19 +1111,28 @@ class Pipe:
             )
             self.log_debug(f"[handle_flowise_request] User ID: {user_id}")
 
-            session = self.session_manager.get_session(user_id)
-            chat_id = session.get("session_id")
+            # Retrieve session information
+            chat_session = self.session_manager.get_session(user_id)
+            chat_id = chat_session.get("session_id")
             self.log_debug(f"[handle_flowise_request] Current session ID: {chat_id}")
 
-            if chat_id:
-                payload["chatId"] = chat_id
-                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {chat_id}")
+            # Option 1: Using 'history' parameter
+            history = chat_session.get("chat_history", [])
+            formatted_history = []
+            for msg in history:
+                role = "userMessage" if msg["role"] == "user" else "apiMessage"
+                formatted_history.append({"role": role, "content": msg["content"]})
+            self.log_debug(f"[handle_flowise_request] Formatted history: {formatted_history}")
 
-            # Optionally include the system prompt
-            if self.valves.include_system_prompt and session.get("system_message"):
-                system_message = session.get("system_message", "")
-                payload["systemMessage"] = system_message
-                self.log_debug(f"[handle_flowise_request] Included systemMessage: {system_message}")
+            payload["history"] = formatted_history
+
+            # Option 2: Using 'overrideConfig' with 'sessionId' (if you prefer session-based persistence)
+            # Uncomment the following lines to use sessionId instead of history
+            """
+            if chat_id:
+                payload["overrideConfig"] = {"sessionId": chat_id}
+                self.log_debug(f"[handle_flowise_request] Added overrideConfig with sessionId: {chat_id}")
+            """
 
             self.log_debug(f"[handle_flowise_request] Final payload: {payload}")
 
@@ -1192,8 +1198,17 @@ class Pipe:
             text = self.clean_response_text(raw_text)
             self.log_debug(f"[handle_flowise_request] Cleaned response text: {text!r}")
 
+            # If using 'overrideConfig' with 'sessionId', handle session persistence
+            """
             new_chat_id = data.get("chatId", chat_id)
             self.log_debug(f"[handle_flowise_request] New chat ID: {new_chat_id}")
+
+            if new_chat_id and new_chat_id != chat_id:
+                self.session_manager.update_session(user_id, "session_id", new_chat_id)
+                self.log_debug(
+                    f"[handle_flowise_request] Updated session ID for user '{user_id}' to '{new_chat_id}'."
+                )
+            """
 
             if not text:
                 error_message = "Error: Empty response from Flowise."
@@ -1201,7 +1216,6 @@ class Pipe:
                 return {"error": error_message}
 
             # Update chat session
-            self.session_manager.update_session(user_id, "session_id", new_chat_id)
             self.session_manager.append_to_history(user_id, "assistant", text)
 
             self.log_debug(
@@ -1394,8 +1408,6 @@ class Pipe:
             self.reset_state()
             self.request_id = str(time.time())
             self.log_debug(f"[pipe] Starting new request with ID: {self.request_id}")
-
-            output = {}  # Initialize output to ensure it's defined
 
             # Retrieve and process the model name
             model_full_name = body.get("model", "").strip()
