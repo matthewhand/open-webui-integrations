@@ -1,7 +1,7 @@
 """
 title: Flowise Manifold, for connecting to external Flowise instance endpoint
 author: matthewh
-version: 3.2
+version: 3.3
 license: MIT
 required_open_webui_version: 0.4.4
 
@@ -14,13 +14,11 @@ TODO
 - [x] Precise prompt
   - [x] Toggle for entire chat history 
   - [x] Toggle for system prompt
-- [x] LLM features
-  - [x] Summarization
-  - [x] Status updates
 - [x] Add Citation Emission
-- [x] Add Session Mapping
-- [x] Ensure all try blocks have try/catch/finally
-- [x] Increment version number and update TODO list
+- [ ] LLM features
+  - [ ] Summarization
+  - [ ] Status updates
+- [ ] Fix Session Mapping
 """
 
 import json
@@ -84,31 +82,47 @@ class SessionManager:
     def get_session(self, user_id: str) -> Dict[str, Any]:
         try:
             if user_id not in self.sessions:
-                self.sessions[user_id] = {"chat_history": [], "session_id": self.generate_session_id()}
+                self.sessions[user_id] = {
+                    "chat_history": [],
+                    "session_id": self.generate_session_id(),
+                }
                 self.log.debug(f"[SessionManager] Created new session for user '{user_id}'.")
             else:
                 self.log.debug(f"[SessionManager] Retrieved existing session for user '{user_id}'.")
             return self.sessions[user_id]
         except Exception as e:
-            self.log.error(f"[SessionManager] Error retrieving session for user '{user_id}': {e}", exc_info=True)
+            self.log.error(
+                f"[SessionManager] Error retrieving session for user '{user_id}': {e}",
+                exc_info=True,
+            )
             raise
 
     def update_session(self, user_id: str, key: str, value: Any):
         try:
             session = self.get_session(user_id)
             session[key] = value
-            self.log.debug(f"[SessionManager] Updated session '{key}' for user '{user_id}' with value '{value}'.")
+            self.log.debug(
+                f"[SessionManager] Updated session '{key}' for user '{user_id}' with value '{value}'."
+            )
         except Exception as e:
-            self.log.error(f"[SessionManager] Error updating session '{key}' for user '{user_id}': {e}", exc_info=True)
+            self.log.error(
+                f"[SessionManager] Error updating session '{key}' for user '{user_id}': {e}",
+                exc_info=True,
+            )
             raise
 
     def append_to_history(self, user_id: str, role: str, content: str):
         try:
             session = self.get_session(user_id)
             session["chat_history"].append({"role": role, "content": content})
-            self.log.debug(f"[SessionManager] Appended to chat_history for user '{user_id}': {role}: {content}")
+            self.log.debug(
+                f"[SessionManager] Appended to chat_history for user '{user_id}': {role}: {content}"
+            )
         except Exception as e:
-            self.log.error(f"[SessionManager] Error appending to history for user '{user_id}': {e}", exc_info=True)
+            self.log.error(
+                f"[SessionManager] Error appending to history for user '{user_id}': {e}",
+                exc_info=True,
+            )
             raise
 
     def generate_session_id(self) -> str:
@@ -1123,23 +1137,12 @@ class Pipe:
             chat_id = chat_session.get("session_id")
             self.log_debug(f"[handle_flowise_request] Current session ID: {chat_id}")
 
-            # Option 1: Using 'history' parameter
-            history = chat_session.get("chat_history", [])
-            formatted_history = []
-            for msg in history:
-                role = "userMessage" if msg["role"] == "user" else "apiMessage"
-                formatted_history.append({"role": role, "content": msg["content"]})
-            self.log_debug(f"[handle_flowise_request] Formatted history: {formatted_history}")
-
-            payload["history"] = formatted_history
-
-            # Option 2: Using 'overrideConfig' with 'sessionId' (if you prefer session-based persistence)
-            # Uncomment the following lines to use sessionId instead of history
-            """
+            # Use 'overrideConfig' with 'sessionId' to maintain session
             if chat_id:
                 payload["overrideConfig"] = {"sessionId": chat_id}
-                self.log_debug(f"[handle_flowise_request] Added overrideConfig with sessionId: {chat_id}")
-            """
+                self.log_debug(
+                    f"[handle_flowise_request] Added overrideConfig with sessionId: {chat_id}"
+                )
 
             self.log_debug(f"[handle_flowise_request] Final payload: {payload}")
 
@@ -1232,6 +1235,14 @@ class Pipe:
                 tool_name = tool.get("tool", "")
                 self.log_debug(f"[handle_flowise_request] Emitting citation for tool '{tool_name}'.")
                 self.emit_citation(__event_emitter__, tool_output, tool_name)
+
+            # Optionally update session ID if Flowise provides a new one
+            new_chat_id = data.get("sessionId", chat_id)
+            if new_chat_id and new_chat_id != chat_id:
+                self.session_manager.update_session(user_id, "session_id", new_chat_id)
+                self.log_debug(
+                    f"[handle_flowise_request] Updated session ID for user '{user_id}' to '{new_chat_id}'."
+                )
 
             return {"response": text}
 
@@ -1576,52 +1587,4 @@ class Pipe:
                 self.log_debug("[pipe] Pipe processing completed successfully.")
             else:
                 self.log_debug("[pipe] Pipe processing completed with errors.")
-
-    def clean_response_text(self, text: str) -> str:
-        """
-        Cleans the response text by removing enclosing quotes and trimming whitespace.
-
-        Args:
-            text (str): The text to clean.
-
-        Returns:
-            str: The cleaned text.
-        """
-        self.log_debug(f"[clean_response_text] Entering with: {text!r}")
-        try:
-            pattern = r'^([\'"])(.*)\1$'
-            match = re.match(pattern, text)
-            if match:
-                text = match.group(2)
-                self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
-            return text.strip()
-        except Exception as e:
-            self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
-            return text
-        finally:
-            self.log_debug("[clean_response_text] Finished cleaning response text.")
-
-    def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """
-        Returns the last user message to be used as the combined prompt.
-
-        Args:
-            messages (List[Dict[str, str]]): List of message dictionaries.
-
-        Returns:
-            str: The last user message content or an empty string if not found.
-        """
-        self.log_debug(f"[get_combined_prompt] Entering with messages: {messages}")
-        try:
-            if not messages:
-                self.log_debug("[get_combined_prompt] No messages available.")
-                return ""
-            last_message = messages[-1].get("content", "")
-            self.log_debug(f"[get_combined_prompt] Returning last message: {last_message}")
-            return last_message
-        except Exception as e:
-            self.log_error(f"[get_combined_prompt] Error getting last message: {e}", exc_info=True)
-            return ""
-        finally:
-            self.log_debug("[get_combined_prompt] Finished getting combined prompt.")
 
