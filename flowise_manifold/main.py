@@ -244,7 +244,7 @@ class Pipe:
         self.log_debug(f"[INIT] Assigned ID: {self.id}, Name: {self.name}")
 
         # Initialize other attributes
-        self.chat_sessions: Dict[str, Any] = {}
+        self.chat_sessions: Dict[str, Any] = {}  # Keyed by chat_id
         self.start_time: Optional[float] = None
         self.flowise_available: bool = True
         self.chatflows: Dict[str, str] = {}
@@ -743,7 +743,7 @@ class Pipe:
         self.log_debug("[get_chatflows] Retrieving all available models.")
         return self.chatflows.copy()
 
-    def get_last_user_message(self, messages: List[Dict[str, str]]) -> Optional[str]:
+    def get_last_user_message(self, messages: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
         """
         Retrieve the most recent user message.
 
@@ -751,12 +751,11 @@ class Pipe:
             messages (List[Dict[str, str]]): List of message dictionaries.
 
         Returns:
-            Optional[str]: The content of the last user message, or None if not found.
+            Optional[Dict[str, str]]: The last user message dictionary, or None if not found.
         """
         last_message = get_last_user_message(messages)
         if last_message:
             self.log_debug(f"[get_last_user_message] Last user message: {last_message}")
-            # return last_message.get("content")
             return last_message
         self.log_debug("[get_last_user_message] No user message found.")
         return None
@@ -952,6 +951,7 @@ class Pipe:
         __user__: Optional[dict],
         __event_emitter__: Optional[Callable[[dict], Any]],
         chatflow_name: str = "",
+        chat_id: str = "",  # NEW: Added chat_id parameter
     ) -> Union[Dict[str, Any], Dict[str, str]]:
         """
         Send the prompt to Flowise for processing.
@@ -961,6 +961,7 @@ class Pipe:
             __user__ (Optional[dict]): User information dictionary.
             __event_emitter__ (Optional[Callable[[dict], Any]]): Event emitter for status updates.
             chatflow_name (str): Name of the chatflow to use.
+            chat_id (str): Open-WebUI's chat_id to associate Flowise session.
 
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: Response from Flowise or error message.
@@ -975,18 +976,19 @@ class Pipe:
             payload = {"question": question}
             self.log_debug(f"[handle_flowise_request] Initial payload: {payload}")
 
-            user_id = (
-                __user__.get("user_id", "default_user") if __user__ else "default_user"
-            )
-            self.log_debug(f"[handle_flowise_request] User ID: {user_id}")
+            # Retrieve Flowise session IDs from chat_sessions using chat_id
+            chat_session = self.chat_sessions.get(chat_id, {})
+            self.log_debug(f"[handle_flowise_request] Current chat session for chat_id '{chat_id}': {chat_session}")
 
-            chat_session = self.chat_sessions.get(user_id, {})
-            self.log_debug(f"[handle_flowise_request] Current chat session: {chat_session}")
+            session_id = chat_session.get("session_id")
+            flowise_chat_id = chat_session.get("flowise_chat_id")
 
-            chat_id = chat_session.get("chat_id")
-            if chat_id:
-                payload["chatId"] = chat_id
-                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {chat_id}")
+            if session_id:
+                payload["sessionId"] = session_id
+                self.log_debug(f"[handle_flowise_request] Added sessionId to payload: {session_id}")
+            if flowise_chat_id:
+                payload["chatId"] = flowise_chat_id
+                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {flowise_chat_id}")
 
             # Optionally include the system prompt
             if self.valves.include_system_prompt and chat_session.get("system_message"):
@@ -1058,27 +1060,32 @@ class Pipe:
             text = self.clean_response_text(raw_text)
             self.log_debug(f"[handle_flowise_request] Cleaned response text: {text!r}")
 
-            new_chat_id = data.get("chatId", chat_id)
-            self.log_debug(f"[handle_flowise_request] New chat ID: {new_chat_id}")
+            new_session_id = data.get("sessionId")
+            new_flowise_chat_id = data.get("chatId", flowise_chat_id)  # Retain old chatId if new one not provided
+            self.log_debug(f"[handle_flowise_request] New session ID: {new_session_id}, New chat ID: {new_flowise_chat_id}")
+
+            if new_session_id:
+                self.chat_sessions[chat_id]["session_id"] = new_session_id
+                self.log_debug(
+                    f"[handle_flowise_request] Updated session_id for chat_id '{chat_id}': {new_session_id}"
+                )
+            if new_flowise_chat_id:
+                self.chat_sessions[chat_id]["flowise_chat_id"] = new_flowise_chat_id
+                self.log_debug(
+                    f"[handle_flowise_request] Updated flowise_chat_id for chat_id '{chat_id}': {new_flowise_chat_id}"
+                )
 
             if not text:
                 error_message = "Error: Empty response from Flowise."
                 self.log_debug(f"[handle_flowise_request] {error_message}")
                 return {"error": error_message}
 
-            # Update chat session
-            if user_id not in self.chat_sessions:
-                self.chat_sessions[user_id] = {"chat_id": None, "history": [], "system_message": ""}
-                self.log_debug(
-                    f"[handle_flowise_request] Created new chat session for user '{user_id}'."
-                )
-
-            self.chat_sessions[user_id]["chat_id"] = new_chat_id
-            self.chat_sessions[user_id]["history"].append(
+            # Update chat session history
+            self.chat_sessions[chat_id]["history"].append(
                 {"role": "assistant", "content": text}
             )
             self.log_debug(
-                f"[handle_flowise_request] Updated history for user '{user_id}': {self.chat_sessions[user_id]['history']}"
+                f"[handle_flowise_request] Updated history for chat_id '{chat_id}': {self.chat_sessions[chat_id]['history']}"
             )
 
             # Emit the Flowise response via the event emitter
@@ -1092,154 +1099,135 @@ class Pipe:
 
             return {"response": text}
 
-        except requests.exceptions.RequestException as e:
-            # Handle any request-related exceptions (e.g., connection errors)
-            error_message = f"Request failed: {str(e)}"
-            self.log_debug(f"[handle_flowise_request] {error_message}")
-            return {"error": error_message}
+        def clean_response_text(self, text: str) -> str:
+            """
+            Cleans the response text by removing enclosing quotes and trimming whitespace.
 
-        except Exception as e:
-            # Handle any other unexpected exceptions
-            error_message = f"Error during Flowise request handling: {e}"
-            self.log_error(f"[handle_flowise_request] {error_message}", exc_info=True)
-            return {"error": error_message}
+            Args:
+                text (str): The text to clean.
 
-        finally:
-            # Ensure that if 'text' is set, it's returned; otherwise, an error is returned
-            if text:
-                # Only set 'response' if text was successfully extracted
-                pass  # 'response' is already returned in try block
-            else:
-                pass  # Errors are already handled in except blocks
-
-    def clean_response_text(self, text: str) -> str:
-        """
-        Cleans the response text by removing enclosing quotes and trimming whitespace.
-
-        Args:
-            text (str): The text to clean.
-
-        Returns:
-            str: The cleaned text.
-        """
-        self.log_debug(f"[clean_response_text] Entering with: {text!r}")
-        try:
-            pattern = r'^([\'"])(.*)\1$'
-            match = re.match(pattern, text)
-            if match:
-                text = match.group(2)
-                self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
-            return text.strip()
-        except Exception as e:
-            self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
-            return text
-        finally:
-            self.log_debug("[clean_response_text] Finished cleaning response text.")
-
-    def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
-        """
-        Combines user and assistant messages into a structured prompt.
-
-        Example:
-            User: Hi!
-            Assistant: Hello! How can I help you today?
-            User: Tell me a joke.
-        """
-        prompt_parts = [
-            f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
-            for message in messages
-        ]
-        combined_prompt = "\n".join(prompt_parts)
-        self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
-        return combined_prompt
-
-    def reset_state(self):
-        """Reset per-request state variables without clearing chat_sessions."""
-        try:
-            # Reset per-request variables only
-            self.start_time = time.time()  # Start time of the current pipe execution
-            self.last_emit_time = 0.0
-            self.log_debug("[reset_state] Per-request state variables have been reset.")
-        except Exception as e:
-            self.log_error(f"[reset_state] Unexpected error: {e}", exc_info=True)
-        finally:
-            self.log_debug("[reset_state] Finished resetting state.")
-
-    def emit_status_sync(
-        self,
-        __event_emitter__: Callable[[dict], Any],
-        message: str,
-        done: bool,
-    ):
-        """Emit status updates to the event emitter synchronously."""
-        if __event_emitter__:
-            event = {
-                "type": "status",
-                "data": {"description": message, "done": done},
-            }
-            self.log_debug(f"[emit_status_sync] Preparing to emit status event: {event}")
-
+            Returns:
+                str: The cleaned text.
+            """
+            self.log_debug(f"[clean_response_text] Entering with: {text!r}")
             try:
-                if asyncio.iscoroutinefunction(__event_emitter__):
-                    self.log_debug("[emit_status_sync] Detected asynchronous event emitter.")
-                    asyncio.create_task(__event_emitter__(event))
-                else:
-                    self.log_debug("[emit_status_sync] Detected synchronous event emitter.")
-                    __event_emitter__(event)
-
-                self.log_debug("[emit_status_sync] Status event emitted successfully.")
+                pattern = r'^([\'"])(.*)\1$'
+                match = re.match(pattern, text)
+                if match:
+                    text = match.group(2)
+                    self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
+                return text.strip()
             except Exception as e:
-                self.log_error(
-                    f"[emit_status_sync] Error emitting status event: {e}",
-                    exc_info=True,
-                )
+                self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
+                return text
             finally:
-                self.log_debug("[emit_status_sync] Finished emitting status event.")
+                self.log_debug("[clean_response_text] Finished cleaning response text.")
 
-    def emit_output_sync(
-        self,
-        __event_emitter__: Callable[[dict], Any],
-        content: str,
-        include_collapsible: bool = False,
-    ):
-        """Emit message updates to the event emitter synchronously."""
-        if __event_emitter__ and content:
-            # Prepare the message event
-            if include_collapsible:
-                content = f"""
+        def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
+            """
+            Combines user and assistant messages into a structured prompt.
+
+            Example:
+                User: Hi!
+                Assistant: Hello! How can I help you today?
+                User: Tell me a joke.
+            """
+            prompt_parts = [
+                f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
+                for message in messages
+            ]
+            combined_prompt = "\n".join(prompt_parts)
+            self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
+            return combined_prompt
+
+        def reset_state(self):
+            """Reset per-request state variables without clearing chat_sessions."""
+            try:
+                # Reset per-request variables only
+                self.start_time = time.time()  # Start time of the current pipe execution
+                self.last_emit_time = 0.0
+                self.log_debug("[reset_state] Per-request state variables have been reset.")
+            except Exception as e:
+                self.log_error(f"[reset_state] Unexpected error: {e}", exc_info=True)
+            finally:
+                self.log_debug("[reset_state] Finished resetting state.")
+
+        def emit_status_sync(
+            self,
+            __event_emitter__: Callable[[dict], Any],
+            message: str,
+            done: bool,
+        ):
+            """Emit status updates to the event emitter synchronously."""
+            if __event_emitter__:
+                event = {
+                    "type": "status",
+                    "data": {"description": message, "done": done},
+                }
+                self.log_debug(f"[emit_status_sync] Preparing to emit status event: {event}")
+
+                try:
+                    if asyncio.iscoroutinefunction(__event_emitter__):
+                        self.log_debug("[emit_status_sync] Detected asynchronous event emitter.")
+                        asyncio.create_task(__event_emitter__(event))
+                    else:
+                        self.log_debug("[emit_status_sync] Detected synchronous event emitter.")
+                        __event_emitter__(event)
+
+                    self.log_debug("[emit_status_sync] Status event emitted successfully.")
+                except Exception as e:
+                    self.log_error(
+                        f"[emit_status_sync] Error emitting status event: {e}",
+                        exc_info=True,
+                    )
+                finally:
+                    self.log_debug("[emit_status_sync] Finished emitting status event.")
+
+        def emit_output_sync(
+            self,
+            __event_emitter__: Callable[[dict], Any],
+            content: str,
+            include_collapsible: bool = False,
+        ):
+            """Emit message updates to the event emitter synchronously."""
+            if __event_emitter__ and content:
+                # Prepare the message event
+                if include_collapsible:
+                    content = f"""
 <details>
 <summary>Click to expand summary</summary>
 {content}
 </details>
-                """.strip()
-            message_event = {
-                "type": "message",
-                "data": {"content": content},
-            }
-            self.log_debug(f"[emit_output_sync] Preparing to emit message event: {message_event}")
+                    """.strip()
+                message_event = {
+                    "type": "message",
+                    "data": {"content": content},
+                }
+                self.log_debug(f"[emit_output_sync] Preparing to emit message event: {message_event}")
 
-            try:
-                if asyncio.iscoroutinefunction(__event_emitter__):
-                    self.log_debug("[emit_output_sync] Detected asynchronous event emitter.")
-                    asyncio.create_task(__event_emitter__(message_event))
-                else:
-                    self.log_debug("[emit_output_sync] Detected synchronous event emitter.")
-                    __event_emitter__(message_event)
+                try:
+                    if asyncio.iscoroutinefunction(__event_emitter__):
+                        self.log_debug("[emit_output_sync] Detected asynchronous event emitter.")
+                        asyncio.create_task(__event_emitter__(message_event))
+                    else:
+                        self.log_debug("[emit_output_sync] Detected synchronous event emitter.")
+                        __event_emitter__(message_event)
 
-                self.log_debug("[emit_output_sync] Message event emitted successfully.")
-            except Exception as e:
-                self.log_error(
-                    f"[emit_output_sync] Error emitting message event: {e}",
-                    exc_info=True,
-                )
-            finally:
-                self.log_debug("[emit_output_sync] Finished emitting message event.")
+                    self.log_debug("[emit_output_sync] Message event emitted successfully.")
+                except Exception as e:
+                    self.log_error(
+                        f"[emit_output_sync] Error emitting message event: {e}",
+                        exc_info=True,
+                    )
+                finally:
+                    self.log_debug("[emit_output_sync] Finished emitting message event.")
 
     def pipe(
         self,
         body: dict,
         __user__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
+        __metadata__: Optional[dict] = None,  # NEW: Added __metadata__ parameter
     ) -> Union[Dict[str, Any], Dict[str, str]]:
         """
         Processes a user request by selecting the appropriate model (chatflow or assistant) or the setup pipe.
@@ -1248,6 +1236,7 @@ class Pipe:
             body (dict): The incoming request payload.
             __user__ (Optional[dict]): The user information.
             __event_emitter__ (Optional[Callable[[dict], Any]]): The event emitter for sending messages.
+            __metadata__ (Optional[dict]): Metadata containing session and chat IDs.
 
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: The Flowise output, setup instructions, or an error message.
@@ -1260,6 +1249,24 @@ class Pipe:
         output = {}  # Initialize output to ensure it's defined
 
         try:
+            # Extract identifiers from __metadata__
+            chat_id = __metadata__.get('chat_id') if __metadata__ else None  # NEW: Extract chat_id
+            if not chat_id:
+                error_message = "Missing 'chat_id' in metadata."
+                self.log_error(f"[pipe] {error_message}")
+                if __event_emitter__:
+                    self.emit_status_sync(__event_emitter__, error_message, done=True)
+                return {"error": error_message}
+
+            # Initialize or retrieve session
+            if chat_id not in self.chat_sessions:
+                self.chat_sessions[chat_id] = {"chat_id": chat_id, "history": [], "system_message": ""}
+                self.log_debug(f"[pipe] Initialized new chat session for chat_id: {chat_id}")
+            else:
+                self.log_debug(f"[pipe] Retrieved existing chat session for chat_id: {chat_id}")
+
+            self.log_debug(f"[pipe] Starting new request with chat_id: {chat_id}")
+
             # Retrieve and process the model name
             model_full_name = body.get("model", "").strip()
             self.log_debug(f"[pipe] Received model name: '{model_full_name}'")
@@ -1345,12 +1352,14 @@ class Pipe:
                 self.log_debug("[pipe] post_entire_chat is False. Using the most recent user message.")
                 last_user_message = self.get_last_user_message(user_messages)
                 if last_user_message:
-                    combined_prompt = last_user_message
+                    combined_prompt = last_user_message["content"]
+                    self.log_debug(f"[pipe] Retrieved last user message: {combined_prompt!r}")
                 else:
                     combined_prompt = self._get_combined_prompt(user_messages)
+                    self.log_debug("[pipe] No user messages available. Using entire chat history.")
 
             self.log_debug(
-                f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt}"
+                f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt!r}"
             )
 
             # Emit initial status: Processing the request
@@ -1380,7 +1389,7 @@ class Pipe:
             if summary:
                 combined_prompt_with_summary = f"{combined_prompt}\n\nSummary:\n{summary}"
                 self.log_debug(
-                    f"[pipe] Combined prompt with summary:\n{combined_prompt_with_summary}"
+                    f"[pipe] Combined prompt with summary:\n{combined_prompt_with_summary!r}"
                 )
             else:
                 combined_prompt_with_summary = combined_prompt
@@ -1389,7 +1398,7 @@ class Pipe:
             if self.valves.include_system_prompt and system_message:
                 combined_prompt_with_summary = f"{system_message}\n\n{combined_prompt_with_summary}"
                 self.log_debug(
-                    f"[pipe] Included system message in prompt:\n{combined_prompt_with_summary}"
+                    f"[pipe] Included system message in prompt:\n{combined_prompt_with_summary!r}"
                 )
 
             # Handle Flowise request
@@ -1398,6 +1407,7 @@ class Pipe:
                 __user__=__user__,
                 __event_emitter__=__event_emitter__,
                 chatflow_name=model_name,
+                chat_id=chat_id,  # NEW: Pass chat_id to associate session
             )
             self.log_debug(f"[pipe] handle_flowise_request output: {output}")
 
@@ -1434,17 +1444,44 @@ class Pipe:
 
             return output
 
-        except Exception as e:
-            # Handle any unexpected exceptions during the pipe processing
-            error_message = f"Unexpected error during pipe processing: {e}"
-            self.log_error(f"[pipe] {error_message}", exc_info=True)
-            if __event_emitter__:
-                self.emit_status_sync(__event_emitter__, error_message, done=True)
-            return {"error": error_message}
+        def clean_response_text(self, text: str) -> str:
+            """
+            Cleans the response text by removing enclosing quotes and trimming whitespace.
 
-        finally:
-            # Ensure the output is returned if it hasn't been already
-            # This prevents 'output' from being undefined
-            if not output:
-                self.log_debug("[pipe] No output generated. Returning empty response.")
-                return {"error": "No output generated."}
+            Args:
+                text (str): The text to clean.
+
+            Returns:
+                str: The cleaned text.
+            """
+            self.log_debug(f"[clean_response_text] Entering with: {text!r}")
+            try:
+                pattern = r'^([\'"])(.*)\1$'
+                match = re.match(pattern, text)
+                if match:
+                    text = match.group(2)
+                    self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
+                return text.strip()
+            except Exception as e:
+                self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
+                return text
+            finally:
+                self.log_debug("[clean_response_text] Finished cleaning response text.")
+
+        def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
+            """
+            Combines user and assistant messages into a structured prompt.
+
+            Example:
+                User: Hi!
+                Assistant: Hello! How can I help you today?
+                User: Tell me a joke.
+            """
+            prompt_parts = [
+                f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
+                for message in messages
+            ]
+            combined_prompt = "\n".join(prompt_parts)
+            self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
+            return combined_prompt
+
