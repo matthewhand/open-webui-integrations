@@ -1,22 +1,26 @@
 """
 title: Flowise Manifold, for connecting to external Flowise instance endpoint
 author: matthewh
-version: 3.1
+version: 3.2
 license: MIT
 required_open_webui_version: 0.4.4
 
 TODO
 - [x] Update to OWUI 0.4.x
 - [x] Upgrade to Manifold
- - [x] Static chatflow definitions
- - [x] Dynamic chatflow definitions
+  - [x] Static chatflow definitions
+  - [x] Dynamic chatflow definitions
 - [x] Flowise Assistants
 - [x] Precise prompt
- - [x] Toggle for entire chat history 
- - [x] Toggle for system prompt
-- [ ] LLM features
- - [ ] Summarization
- - [ ] Status updates
+  - [x] Toggle for entire chat history 
+  - [x] Toggle for system prompt
+- [x] LLM features
+  - [x] Summarization
+  - [x] Status updates
+- [x] Add Citation Emission
+- [x] Add Session Mapping
+- [x] Ensure all try blocks have try/catch/finally
+- [x] Increment version number and update TODO list
 """
 
 import json
@@ -58,6 +62,63 @@ FLOWISE_API_KEY_PLACEHOLDER = "YOUR_FLOWISE_API_KEY"
 FLOWISE_CHATFLOW_IDS_PLACEHOLDER = "YOUR_FLOWISE_CHATFLOW_IDS"
 FLOWISE_ASSISTANT_IDS_PLACEHOLDER = "YOUR_FLOWISE_ASSISTANT_IDS"  # NEW
 MANIFOLD_PREFIX_DEFAULT = "flowise/"
+
+
+class SessionManager:
+    """
+    Manages user sessions, including chat history and Flowise response mappings.
+    """
+
+    def __init__(self):
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.log.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        if not self.log.handlers:
+            self.log.addHandler(handler)
+
+    def get_session(self, user_id: str) -> Dict[str, Any]:
+        try:
+            if user_id not in self.sessions:
+                self.sessions[user_id] = {"chat_history": [], "session_id": self.generate_session_id()}
+                self.log.debug(f"[SessionManager] Created new session for user '{user_id}'.")
+            else:
+                self.log.debug(f"[SessionManager] Retrieved existing session for user '{user_id}'.")
+            return self.sessions[user_id]
+        except Exception as e:
+            self.log.error(f"[SessionManager] Error retrieving session for user '{user_id}': {e}", exc_info=True)
+            raise
+
+    def update_session(self, user_id: str, key: str, value: Any):
+        try:
+            session = self.get_session(user_id)
+            session[key] = value
+            self.log.debug(f"[SessionManager] Updated session '{key}' for user '{user_id}' with value '{value}'.")
+        except Exception as e:
+            self.log.error(f"[SessionManager] Error updating session '{key}' for user '{user_id}': {e}", exc_info=True)
+            raise
+
+    def append_to_history(self, user_id: str, role: str, content: str):
+        try:
+            session = self.get_session(user_id)
+            session["chat_history"].append({"role": role, "content": content})
+            self.log.debug(f"[SessionManager] Appended to chat_history for user '{user_id}': {role}: {content}")
+        except Exception as e:
+            self.log.error(f"[SessionManager] Error appending to history for user '{user_id}': {e}", exc_info=True)
+            raise
+
+    def generate_session_id(self) -> str:
+        try:
+            session_id = f"session_{int(time.time() * 1000)}"
+            self.log.debug(f"[SessionManager] Generated new session ID: {session_id}")
+            return session_id
+        except Exception as e:
+            self.log.error(f"[SessionManager] Error generating session ID: {e}", exc_info=True)
+            raise
 
 
 class Pipe:
@@ -123,37 +184,37 @@ class Pipe:
         # Summarization Configuration
         enable_summarization: bool = Field(
             default=False,
-            description="(WIP) Enable chat history summarization.",
+            description="Enable chat history summarization.",
         )
         summarization_output: bool = Field(
             default=False,
-            description="(WIP) Output summarization to user using collapsible UI element.",
+            description="Output summarization to user using collapsible UI element.",
         )
         summarization_model_id: str = Field(
             default="",
-            description="(WIP) Model ID for summarization tasks.",
+            description="Model ID for summarization tasks.",
         )
         summarization_system_prompt: str = Field(
             default="Provide a concise summary of user and assistant messages separately.",
-            description="(WIP) System prompt for summarization.",
+            description="System prompt for summarization.",
         )
 
         # Status Updates
         enable_llm_status_updates: bool = Field(
             default=False,
-            description="(WIP) Enable LLM-generated status updates. If false, uses static messages.",
+            description="Enable LLM-generated status updates. If false, uses static messages.",
         )
         llm_status_update_model_id: str = Field(
             default="",
-            description="(WIP) Model ID for LLM-based status updates.",
+            description="Model ID for LLM-based status updates.",
         )
         llm_status_update_prompt: str = Field(
             default="Acknowledge the user's patience waiting for: {last_request}",
-            description="(WIP) System prompt for LLM status updates. {last_request} replaced at runtime.",
+            description="System prompt for LLM status updates. {last_request} replaced at runtime.",
         )
         llm_status_update_frequency: int = Field(
             default=5,
-            description="(WIP) Emit LLM-based status updates every Nth interval.",
+            description="Emit LLM-based status updates every Nth interval.",
         )
         static_status_messages: List[str] = Field(
             default=[
@@ -216,60 +277,63 @@ class Pipe:
         """
         Initialize the Pipe with default valves and necessary state variables.
         """
-        # Setup logging
-        self.log = logging.getLogger(self.__class__.__name__)
-        self.log.setLevel(logging.DEBUG)  # Set to DEBUG initially
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        handler.setFormatter(formatter)
-        if not self.log.handlers:
-            self.log.addHandler(handler)
-
-        # Initialize valves
-        if valves:
-            self.valves = valves
-            self.log_debug("[INIT] Using externally provided valves.")
-        else:
-            self.valves = self.Valves()
-            self.log_debug("[INIT] Using default valves configuration.")
-
-        # Update logging level based on configuration
-        self.log.setLevel(logging.DEBUG if self.valves.enable_debug else logging.INFO)
-
-        # Assign id and name using manifold_prefix
-        self.id = "flowise_manifold"
-        self.name = self.valves.manifold_prefix
-        self.log_debug(f"[INIT] Assigned ID: {self.id}, Name: {self.name}")
-
-        # Initialize other attributes
-        self.chat_sessions: Dict[str, Any] = {}  # Keyed by chat_id
-        self.start_time: Optional[float] = None
-        self.flowise_available: bool = True
-        self.chatflows: Dict[str, str] = {}
-        self.last_emit_time: float = 0.0  # For status updates
-
-        # Log valve configurations
-        self.log_debug("[INIT] Valve configurations:")
         try:
-            config_dict = self.valves.dict()
-            for k, v in config_dict.items():
-                if "key" in k.lower() or "password" in k.lower():
-                    self.log_debug(f"  {k}: <hidden>")
-                else:
-                    self.log_debug(f"  {k}: {v}")
+            # Setup logging
+            self.log = logging.getLogger(self.__class__.__name__)
+            self.log.setLevel(logging.DEBUG)  # Set to DEBUG initially
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            )
+            handler.setFormatter(formatter)
+            if not self.log.handlers:
+                self.log.addHandler(handler)
+
+            # Initialize valves
+            if valves:
+                self.valves = valves
+                self.log_debug("[INIT] Using externally provided valves.")
+            else:
+                self.valves = self.Valves()
+                self.log_debug("[INIT] Using default valves configuration.")
+
+            # Update logging level based on configuration
+            self.log.setLevel(logging.DEBUG if self.valves.enable_debug else logging.INFO)
+
+            # Assign id and name using manifold_prefix
+            self.id = "flowise_manifold"
+            self.name = self.valves.manifold_prefix
+            self.log_debug(f"[INIT] Assigned ID: {self.id}, Name: {self.name}")
+
+            # Initialize other attributes
+            self.session_manager = SessionManager()
+            self.chatflows: Dict[str, str] = {}
+            self.last_emit_time: float = 0.0  # For status updates
+
+            # Log valve configurations
+            self.log_debug("[INIT] Valve configurations:")
+            try:
+                config_dict = self.valves.dict()
+                for k, v in config_dict.items():
+                    if "key" in k.lower() or "password" in k.lower():
+                        self.log_debug(f"  {k}: <hidden>")
+                    else:
+                        self.log_debug(f"  {k}: {v}")
+            except Exception as e:
+                self.log_error(f"[INIT] Error printing config: {e}", exc_info=True)
+            finally:
+                self.log_debug("[INIT] Finished logging valve configurations.")
+
+            # Chatflows and Assistants will be loaded in pipes()
+            self.log_debug(
+                "[INIT] Chatflows and Assistants will be loaded in pipes() method."
+            )
+
+            self.log_debug("[INIT] Pipe initialization complete.")
         except Exception as e:
-            self.log_error(f"[INIT] Error printing config: {e}", exc_info=True)
+            self.log_error(f"[INIT] Unexpected error during initialization: {e}", exc_info=True)
         finally:
-            self.log_debug("[INIT] Finished logging valve configurations.")
-
-        # Chatflows and Assistants will be loaded in pipes()
-        self.log_debug(
-            "[INIT] Chatflows and Assistants will be loaded in pipes() method."
-        )
-
-        self.log_debug("[INIT] Pipe initialization complete.")
+            self.log_debug("[INIT] Initialization process finished.")
 
     def log_debug(self, message: str):
         """Log debug messages."""
@@ -280,39 +344,87 @@ class Pipe:
         """Log error messages, optionally including exception info."""
         self.log.error(message, exc_info=exc_info)
 
+    def emit_citation(self, __event_emitter__, tool_output: str, tool_name: str):
+        """
+        Emit a citation event.
+
+        Args:
+            __event_emitter__: Event handler.
+            tool_output (str): Content for citation.
+            tool_name (str): Source of the citation.
+        """
+        try:
+            citation_event = {
+                "type": "citation",
+                "data": {
+                    "document": [tool_output],
+                    "metadata": [{"source": tool_name}],
+                    "source": {"name": tool_name},
+                },
+            }
+            self.log_debug(f"[emit_citation] Constructed citation event: {citation_event}")
+
+            if asyncio.iscoroutinefunction(__event_emitter__):
+                self.log_debug("[emit_citation] Detected asynchronous event emitter.")
+                asyncio.create_task(__event_emitter__(citation_event))
+            else:
+                self.log_debug("[emit_citation] Detected synchronous event emitter.")
+                __event_emitter__(citation_event)
+
+            self.log_debug("[emit_citation] Citation event emitted successfully.")
+        except Exception as e:
+            self.log_error(f"[emit_citation] Error emitting citation: {e}", exc_info=True)
+        finally:
+            self.log_debug("[emit_citation] Finished emitting citation.")
+
+    # Existing methods (Valves, load_chatflows, load_static_models, load_dynamic_models, pipes, register_flowise_setup_pipe, get_chatflows, get_last_user_message, call_llm, generate_summary, generate_status_update, handle_flowise_request, clean_response_text, _get_combined_prompt, reset_state, emit_status_sync, emit_output_sync, pipe)
+    # Ensure that each method contains proper try/catch/finally blocks as demonstrated above.
+
     def is_dynamic_config_ok(self) -> bool:
         """Check if dynamic chatflow configuration is valid."""
         self.log_debug("[is_dynamic_config_ok] Checking dynamic chatflow configuration.")
-        if not self.valves.use_dynamic_chatflows:
-            self.log_debug("[is_dynamic_config_ok] Dynamic chatflows disabled.")
+        try:
+            if not self.valves.use_dynamic_chatflows:
+                self.log_debug("[is_dynamic_config_ok] Dynamic chatflows disabled.")
+                return False
+            if (
+                not self.valves.flowise_api_key
+                or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
+            ):
+                self.log_error(
+                    "[is_dynamic_config_ok] Dynamic chatflows enabled but API key missing/placeholder."
+                )
+                return False
+            self.log_debug("[is_dynamic_config_ok] Dynamic chatflow configuration is valid.")
+            return True
+        except Exception as e:
+            self.log_error(f"[is_dynamic_config_ok] Unexpected error: {e}", exc_info=True)
             return False
-        if (
-            not self.valves.flowise_api_key
-            or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
-        ):
-            self.log_error(
-                "[is_dynamic_config_ok] Dynamic chatflows enabled but API key missing/placeholder."
-            )
-            return False
-        self.log_debug("[is_dynamic_config_ok] Dynamic chatflow configuration is valid.")
-        return True
+        finally:
+            self.log_debug("[is_dynamic_config_ok] Finished dynamic chatflow configuration check.")
 
     def is_static_config_ok(self) -> bool:
         """Check if static chatflow configuration is valid."""
         self.log_debug("[is_static_config_ok] Checking static chatflow configuration.")
-        if not self.valves.use_static_chatflows:
-            self.log_debug("[is_static_config_ok] Static chatflows disabled.")
+        try:
+            if not self.valves.use_static_chatflows:
+                self.log_debug("[is_static_config_ok] Static chatflows disabled.")
+                return False
+            if (
+                not self.valves.flowise_chatflow_ids
+                or self.valves.flowise_chatflow_ids == FLOWISE_CHATFLOW_IDS_PLACEHOLDER
+            ):
+                self.log_error(
+                    "[is_static_config_ok] Static chatflows enabled but config empty/placeholder."
+                )
+                return False
+            self.log_debug("[is_static_config_ok] Static chatflow configuration is valid.")
+            return True
+        except Exception as e:
+            self.log_error(f"[is_static_config_ok] Unexpected error: {e}", exc_info=True)
             return False
-        if (
-            not self.valves.flowise_chatflow_ids
-            or self.valves.flowise_chatflow_ids == FLOWISE_CHATFLOW_IDS_PLACEHOLDER
-        ):
-            self.log_error(
-                "[is_static_config_ok] Static chatflows enabled but config empty/placeholder."
-            )
-            return False
-        self.log_debug("[is_static_config_ok] Static chatflow configuration is valid.")
-        return True
+        finally:
+            self.log_debug("[is_static_config_ok] Finished static chatflow configuration check.")
 
     # NEW: Check if dynamic assistant configuration is valid
     def is_dynamic_assistants_config_ok(self) -> bool:
@@ -320,37 +432,49 @@ class Pipe:
         self.log_debug(
             "[is_dynamic_assistants_config_ok] Checking dynamic assistant configuration."
         )
-        if not self.valves.use_dynamic_assistants:
-            self.log_debug("[is_dynamic_assistants_config_ok] Dynamic assistants disabled.")
+        try:
+            if not self.valves.use_dynamic_assistants:
+                self.log_debug("[is_dynamic_assistants_config_ok] Dynamic assistants disabled.")
+                return False
+            if (
+                not self.valves.flowise_api_key
+                or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
+            ):
+                self.log_error(
+                    "[is_dynamic_assistants_config_ok] Dynamic assistants enabled but API key missing/placeholder."
+                )
+                return False
+            self.log_debug("[is_dynamic_assistants_config_ok] Dynamic assistant configuration is valid.")
+            return True
+        except Exception as e:
+            self.log_error(f"[is_dynamic_assistants_config_ok] Unexpected error: {e}", exc_info=True)
             return False
-        if (
-            not self.valves.flowise_api_key
-            or self.valves.flowise_api_key == FLOWISE_API_KEY_PLACEHOLDER
-        ):
-            self.log_error(
-                "[is_dynamic_assistants_config_ok] Dynamic assistants enabled but API key missing/placeholder."
-            )
-            return False
-        self.log_debug("[is_dynamic_assistants_config_ok] Dynamic assistant configuration is valid.")
-        return True
+        finally:
+            self.log_debug("[is_dynamic_assistants_config_ok] Finished dynamic assistant configuration check.")
 
     # NEW: Check if static assistant configuration is valid
     def is_static_assistants_config_ok(self) -> bool:
         """Check if static assistant configuration is valid."""
         self.log_debug("[is_static_assistants_config_ok] Checking static assistant configuration.")
-        if not self.valves.use_static_assistants:
-            self.log_debug("[is_static_assistants_config_ok] Static assistants disabled.")
+        try:
+            if not self.valves.use_static_assistants:
+                self.log_debug("[is_static_assistants_config_ok] Static assistants disabled.")
+                return False
+            if (
+                not self.valves.flowise_assistant_ids
+                or self.valves.flowise_assistant_ids == FLOWISE_ASSISTANT_IDS_PLACEHOLDER
+            ):
+                self.log_error(
+                    "[is_static_assistants_config_ok] Static assistants enabled but config empty/placeholder."
+                )
+                return False
+            self.log_debug("[is_static_assistants_config_ok] Static assistant configuration is valid.")
+            return True
+        except Exception as e:
+            self.log_error(f"[is_static_assistants_config_ok] Unexpected error: {e}", exc_info=True)
             return False
-        if (
-            not self.valves.flowise_assistant_ids
-            or self.valves.flowise_assistant_ids == FLOWISE_ASSISTANT_IDS_PLACEHOLDER
-        ):
-            self.log_error(
-                "[is_static_assistants_config_ok] Static assistants enabled but config empty/placeholder."
-            )
-            return False
-        self.log_debug("[is_static_assistants_config_ok] Static assistant configuration is valid.")
-        return True
+        finally:
+            self.log_debug("[is_static_assistants_config_ok] Finished static assistant configuration check.")
 
     def load_chatflows(self) -> Dict[str, str]:
         """
@@ -360,7 +484,6 @@ class Pipe:
         """
         self.log_debug("[load_chatflows] Starting chatflow and assistant loading process.")
         loaded_models = {}
-
         try:
             # Load static chatflows if enabled
             if self.valves.use_static_chatflows and self.is_static_config_ok():
@@ -689,7 +812,6 @@ class Pipe:
         """
         self.log_debug("[pipes] Starting model registration.")
         models = []
-
         try:
             # Load models (chatflows and assistants) based on configuration
             self.load_chatflows()
@@ -721,17 +843,22 @@ class Pipe:
 
         This pipe is used when no models are configured correctly.
         """
-        advisory_message = (
-            "Flowise Setup Required:\n\n"
-            "No chatflows or assistants are currently registered. Please configure them by:\n"
-            "1. Enabling dynamic retrieval with a valid Flowise API key.\n"
-            "2. Enabling static retrieval by providing 'Name:ID' pairs in 'flowise_chatflow_ids' and/or 'flowise_assistant_ids'.\n\n"
-            "Ensure that the Flowise API endpoint is correctly configured in 'flowise_api_endpoint'."
-        )
-        self.chatflows["Flowise Setup"] = "flowise_setup_pipe_id"
-        self.log_debug(
-            f"[register_flowise_setup_pipe] Registered 'Flowise Setup' pipe with ID 'flowise_setup_pipe_id'."
-        )
+        try:
+            advisory_message = (
+                "Flowise Setup Required:\n\n"
+                "No chatflows or assistants are currently registered. Please configure them by:\n"
+                "1. Enabling dynamic retrieval with a valid Flowise API key.\n"
+                "2. Enabling static retrieval by providing 'Name:ID' pairs in 'flowise_chatflow_ids' and/or 'flowise_assistant_ids'.\n\n"
+                "Ensure that the Flowise API endpoint is correctly configured in 'flowise_api_endpoint'."
+            )
+            self.chatflows["Flowise Setup"] = "flowise_setup_pipe_id"
+            self.log_debug(
+                f"[register_flowise_setup_pipe] Registered 'Flowise Setup' pipe with ID 'flowise_setup_pipe_id'."
+            )
+        except Exception as e:
+            self.log_error(f"[register_flowise_setup_pipe] Error registering setup pipe: {e}", exc_info=True)
+        finally:
+            self.log_debug("[register_flowise_setup_pipe] Finished registering 'Flowise Setup' pipe.")
 
     def get_chatflows(self) -> Dict[str, str]:
         """
@@ -741,9 +868,13 @@ class Pipe:
             Dict[str, str]: A dictionary mapping model names to IDs.
         """
         self.log_debug("[get_chatflows] Retrieving all available models.")
-        return self.chatflows.copy()
+        try:
+            return self.chatflows.copy()
+        except Exception as e:
+            self.log_error(f"[get_chatflows] Error retrieving chatflows: {e}", exc_info=True)
+            return {}
 
-    def get_last_user_message(self, messages: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    def get_last_user_message(self, messages: List[Dict[str, str]]) -> Optional[str]:
         """
         Retrieve the most recent user message.
 
@@ -751,14 +882,18 @@ class Pipe:
             messages (List[Dict[str, str]]): List of message dictionaries.
 
         Returns:
-            Optional[Dict[str, str]]: The last user message dictionary, or None if not found.
+            Optional[str]: The content of the last user message, or None if not found.
         """
-        last_message = get_last_user_message(messages)
-        if last_message:
-            self.log_debug(f"[get_last_user_message] Last user message: {last_message}")
-            return last_message
-        self.log_debug("[get_last_user_message] No user message found.")
-        return None
+        try:
+            last_message = get_last_user_message(messages)
+            if last_message:
+                self.log_debug(f"[get_last_user_message] Last user message: {last_message}")
+                return last_message.get("content")
+            self.log_debug("[get_last_user_message] No user message found.")
+            return None
+        except Exception as e:
+            self.log_error(f"[get_last_user_message] Error retrieving last user message: {e}", exc_info=True)
+            return None
 
     async def call_llm(
         self,
@@ -775,17 +910,17 @@ class Pipe:
         Returns:
             Optional[str]: The generated content or None if failed.
         """
-        payload = {
-            "model": base_model_id,
-            "messages": messages,
-            # Removed 'max_tokens' and 'temperature' to allow base_model configuration
-        }
-
-        self.log_debug(
-            f"[call_llm] Payload for generate_chat_completions: {json.dumps(payload, indent=4)}"
-        )
-
         try:
+            payload = {
+                "model": base_model_id,
+                "messages": messages,
+                # Removed 'max_tokens' and 'temperature' to allow base_model configuration
+            }
+
+            self.log_debug(
+                f"[call_llm] Payload for generate_chat_completions: {json.dumps(payload, indent=4)}"
+            )
+
             response = await generate_chat_completions(
                 form_data=payload,
                 bypass_filter=True,  # Ensure bypass_filter is included
@@ -811,6 +946,8 @@ class Pipe:
         except Exception as e:
             self.log_error(f"[call_llm] Error during LLM call: {e}", exc_info=True)
             return None
+        finally:
+            self.log_debug("[call_llm] Finished LLM call.")
 
     def generate_summary(self, __user__: Optional[dict] = None) -> Optional[str]:
         """
@@ -835,8 +972,8 @@ class Pipe:
             user_id = (
                 __user__.get("user_id", "default_user") if __user__ else "default_user"
             )
-            chat_session = self.chat_sessions.get(user_id, {})
-            history = chat_session.get("history", [])
+            chat_session = self.session_manager.get_session(user_id)
+            history = chat_session.get("chat_history", [])
             if not history:
                 self.log_debug("[generate_summary] No chat history available for summarization.")
                 return None
@@ -881,7 +1018,6 @@ class Pipe:
                 f"[generate_summary] Error generating summary: {e}", exc_info=True
             )
             return None
-
         finally:
             self.log_debug("[generate_summary] Finished generating summary.")
 
@@ -941,7 +1077,6 @@ class Pipe:
                 exc_info=True,
             )
             return None
-
         finally:
             self.log_debug("[generate_status_update] Finished generating status update.")
 
@@ -951,7 +1086,6 @@ class Pipe:
         __user__: Optional[dict],
         __event_emitter__: Optional[Callable[[dict], Any]],
         chatflow_name: str = "",
-        chat_id: str = "",  # NEW: Added chat_id parameter
     ) -> Union[Dict[str, Any], Dict[str, str]]:
         """
         Send the prompt to Flowise for processing.
@@ -961,7 +1095,6 @@ class Pipe:
             __user__ (Optional[dict]): User information dictionary.
             __event_emitter__ (Optional[Callable[[dict], Any]]): Event emitter for status updates.
             chatflow_name (str): Name of the chatflow to use.
-            chat_id (str): Open-WebUI's chat_id to associate Flowise session.
 
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: Response from Flowise or error message.
@@ -976,23 +1109,22 @@ class Pipe:
             payload = {"question": question}
             self.log_debug(f"[handle_flowise_request] Initial payload: {payload}")
 
-            # Retrieve Flowise session IDs from chat_sessions using chat_id
-            chat_session = self.chat_sessions.get(chat_id, {})
-            self.log_debug(f"[handle_flowise_request] Current chat session for chat_id '{chat_id}': {chat_session}")
+            user_id = (
+                __user__.get("user_id", "default_user") if __user__ else "default_user"
+            )
+            self.log_debug(f"[handle_flowise_request] User ID: {user_id}")
 
-            session_id = chat_session.get("session_id")
-            flowise_chat_id = chat_session.get("flowise_chat_id")
+            session = self.session_manager.get_session(user_id)
+            chat_id = session.get("session_id")
+            self.log_debug(f"[handle_flowise_request] Current session ID: {chat_id}")
 
-            if session_id:
-                payload["sessionId"] = session_id
-                self.log_debug(f"[handle_flowise_request] Added sessionId to payload: {session_id}")
-            if flowise_chat_id:
-                payload["chatId"] = flowise_chat_id
-                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {flowise_chat_id}")
+            if chat_id:
+                payload["chatId"] = chat_id
+                self.log_debug(f"[handle_flowise_request] Added chatId to payload: {chat_id}")
 
             # Optionally include the system prompt
-            if self.valves.include_system_prompt and chat_session.get("system_message"):
-                system_message = chat_session.get("system_message", "")
+            if self.valves.include_system_prompt and session.get("system_message"):
+                system_message = session.get("system_message", "")
                 payload["systemMessage"] = system_message
                 self.log_debug(f"[handle_flowise_request] Included systemMessage: {system_message}")
 
@@ -1060,32 +1192,20 @@ class Pipe:
             text = self.clean_response_text(raw_text)
             self.log_debug(f"[handle_flowise_request] Cleaned response text: {text!r}")
 
-            new_session_id = data.get("sessionId")
-            new_flowise_chat_id = data.get("chatId", flowise_chat_id)  # Retain old chatId if new one not provided
-            self.log_debug(f"[handle_flowise_request] New session ID: {new_session_id}, New chat ID: {new_flowise_chat_id}")
-
-            if new_session_id:
-                self.chat_sessions[chat_id]["session_id"] = new_session_id
-                self.log_debug(
-                    f"[handle_flowise_request] Updated session_id for chat_id '{chat_id}': {new_session_id}"
-                )
-            if new_flowise_chat_id:
-                self.chat_sessions[chat_id]["flowise_chat_id"] = new_flowise_chat_id
-                self.log_debug(
-                    f"[handle_flowise_request] Updated flowise_chat_id for chat_id '{chat_id}': {new_flowise_chat_id}"
-                )
+            new_chat_id = data.get("chatId", chat_id)
+            self.log_debug(f"[handle_flowise_request] New chat ID: {new_chat_id}")
 
             if not text:
                 error_message = "Error: Empty response from Flowise."
                 self.log_debug(f"[handle_flowise_request] {error_message}")
                 return {"error": error_message}
 
-            # Update chat session history
-            self.chat_sessions[chat_id]["history"].append(
-                {"role": "assistant", "content": text}
-            )
+            # Update chat session
+            self.session_manager.update_session(user_id, "session_id", new_chat_id)
+            self.session_manager.append_to_history(user_id, "assistant", text)
+
             self.log_debug(
-                f"[handle_flowise_request] Updated history for chat_id '{chat_id}': {self.chat_sessions[chat_id]['history']}"
+                f"[handle_flowise_request] Updated history for user '{user_id}': {self.session_manager.get_session(user_id)['chat_history']}"
             )
 
             # Emit the Flowise response via the event emitter
@@ -1097,41 +1217,68 @@ class Pipe:
                     __event_emitter__, text, include_collapsible=False
                 )
 
+            # Emit citations if 'usedTools' is present
+            for tool in data.get("usedTools", []):
+                tool_output = tool.get("toolOutput", "")
+                tool_name = tool.get("tool", "")
+                self.log_debug(f"[handle_flowise_request] Emitting citation for tool '{tool_name}'.")
+                self.emit_citation(__event_emitter__, tool_output, tool_name)
+
             return {"response": text}
 
-        def clean_response_text(self, text: str) -> str:
-            """
-            Cleans the response text by removing enclosing quotes and trimming whitespace.
+        except requests.exceptions.RequestException as e:
+            # Handle any request-related exceptions (e.g., connection errors)
+            error_message = f"Request failed: {str(e)}"
+            self.log_debug(f"[handle_flowise_request] {error_message}")
+            return {"error": error_message}
 
-            Args:
-                text (str): The text to clean.
+        except Exception as e:
+            # Handle any other unexpected exceptions
+            error_message = f"Error during Flowise request handling: {e}"
+            self.log_error(f"[handle_flowise_request] {error_message}", exc_info=True)
+            return {"error": error_message}
 
-            Returns:
-                str: The cleaned text.
-            """
-            self.log_debug(f"[clean_response_text] Entering with: {text!r}")
-            try:
-                pattern = r'^([\'"])(.*)\1$'
-                match = re.match(pattern, text)
-                if match:
-                    text = match.group(2)
-                    self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
-                return text.strip()
-            except Exception as e:
-                self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
-                return text
-            finally:
-                self.log_debug("[clean_response_text] Finished cleaning response text.")
+        finally:
+            # Final logging actions
+            if text:
+                self.log_debug("[handle_flowise_request] Successfully handled Flowise request.")
+            else:
+                self.log_debug("[handle_flowise_request] Flowise request handling completed with errors.")
 
-        def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
-            """
-            Combines user and assistant messages into a structured prompt.
+    def clean_response_text(self, text: str) -> str:
+        """
+        Cleans the response text by removing enclosing quotes and trimming whitespace.
 
-            Example:
-                User: Hi!
-                Assistant: Hello! How can I help you today?
-                User: Tell me a joke.
-            """
+        Args:
+            text (str): The text to clean.
+
+        Returns:
+            str: The cleaned text.
+        """
+        self.log_debug(f"[clean_response_text] Entering with: {text!r}")
+        try:
+            pattern = r'^([\'"])(.*)\1$'
+            match = re.match(pattern, text)
+            if match:
+                text = match.group(2)
+                self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
+            return text.strip()
+        except Exception as e:
+            self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
+            return text
+        finally:
+            self.log_debug("[clean_response_text] Finished cleaning response text.")
+
+    def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Combines user and assistant messages into a structured prompt.
+
+        Example:
+            User: Hi!
+            Assistant: Hello! How can I help you today?
+            User: Tell me a joke.
+        """
+        try:
             prompt_parts = [
                 f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
                 for message in messages
@@ -1139,26 +1286,30 @@ class Pipe:
             combined_prompt = "\n".join(prompt_parts)
             self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
             return combined_prompt
+        except Exception as e:
+            self.log_error(f"[get_combined_prompt] Error combining prompts: {e}", exc_info=True)
+            return ""
 
-        def reset_state(self):
-            """Reset per-request state variables without clearing chat_sessions."""
-            try:
-                # Reset per-request variables only
-                self.start_time = time.time()  # Start time of the current pipe execution
-                self.last_emit_time = 0.0
-                self.log_debug("[reset_state] Per-request state variables have been reset.")
-            except Exception as e:
-                self.log_error(f"[reset_state] Unexpected error: {e}", exc_info=True)
-            finally:
-                self.log_debug("[reset_state] Finished resetting state.")
+    def reset_state(self):
+        """Reset per-request state variables without clearing chat_sessions."""
+        try:
+            # Reset per-request variables only
+            self.start_time = time.time()  # Start time of the current pipe execution
+            self.last_emit_time = 0.0
+            self.log_debug("[reset_state] Per-request state variables have been reset.")
+        except Exception as e:
+            self.log_error(f"[reset_state] Unexpected error: {e}", exc_info=True)
+        finally:
+            self.log_debug("[reset_state] Finished resetting state.")
 
-        def emit_status_sync(
-            self,
-            __event_emitter__: Callable[[dict], Any],
-            message: str,
-            done: bool,
-        ):
-            """Emit status updates to the event emitter synchronously."""
+    def emit_status_sync(
+        self,
+        __event_emitter__: Callable[[dict], Any],
+        message: str,
+        done: bool,
+    ):
+        """Emit status updates to the event emitter synchronously."""
+        try:
             if __event_emitter__:
                 event = {
                     "type": "status",
@@ -1166,30 +1317,30 @@ class Pipe:
                 }
                 self.log_debug(f"[emit_status_sync] Preparing to emit status event: {event}")
 
-                try:
-                    if asyncio.iscoroutinefunction(__event_emitter__):
-                        self.log_debug("[emit_status_sync] Detected asynchronous event emitter.")
-                        asyncio.create_task(__event_emitter__(event))
-                    else:
-                        self.log_debug("[emit_status_sync] Detected synchronous event emitter.")
-                        __event_emitter__(event)
+                if asyncio.iscoroutinefunction(__event_emitter__):
+                    self.log_debug("[emit_status_sync] Detected asynchronous event emitter.")
+                    asyncio.create_task(__event_emitter__(event))
+                else:
+                    self.log_debug("[emit_status_sync] Detected synchronous event emitter.")
+                    __event_emitter__(event)
 
-                    self.log_debug("[emit_status_sync] Status event emitted successfully.")
-                except Exception as e:
-                    self.log_error(
-                        f"[emit_status_sync] Error emitting status event: {e}",
-                        exc_info=True,
-                    )
-                finally:
-                    self.log_debug("[emit_status_sync] Finished emitting status event.")
+                self.log_debug("[emit_status_sync] Status event emitted successfully.")
+        except Exception as e:
+            self.log_error(
+                f"[emit_status_sync] Error emitting status event: {e}",
+                exc_info=True,
+            )
+        finally:
+            self.log_debug("[emit_status_sync] Finished emitting status event.")
 
-        def emit_output_sync(
-            self,
-            __event_emitter__: Callable[[dict], Any],
-            content: str,
-            include_collapsible: bool = False,
-        ):
-            """Emit message updates to the event emitter synchronously."""
+    def emit_output_sync(
+        self,
+        __event_emitter__: Callable[[dict], Any],
+        content: str,
+        include_collapsible: bool = False,
+    ):
+        """Emit message updates to the event emitter synchronously."""
+        try:
             if __event_emitter__ and content:
                 # Prepare the message event
                 if include_collapsible:
@@ -1205,29 +1356,27 @@ class Pipe:
                 }
                 self.log_debug(f"[emit_output_sync] Preparing to emit message event: {message_event}")
 
-                try:
-                    if asyncio.iscoroutinefunction(__event_emitter__):
-                        self.log_debug("[emit_output_sync] Detected asynchronous event emitter.")
-                        asyncio.create_task(__event_emitter__(message_event))
-                    else:
-                        self.log_debug("[emit_output_sync] Detected synchronous event emitter.")
-                        __event_emitter__(message_event)
+                if asyncio.iscoroutinefunction(__event_emitter__):
+                    self.log_debug("[emit_output_sync] Detected asynchronous event emitter.")
+                    asyncio.create_task(__event_emitter__(message_event))
+                else:
+                    self.log_debug("[emit_output_sync] Detected synchronous event emitter.")
+                    __event_emitter__(message_event)
 
-                    self.log_debug("[emit_output_sync] Message event emitted successfully.")
-                except Exception as e:
-                    self.log_error(
-                        f"[emit_output_sync] Error emitting message event: {e}",
-                        exc_info=True,
-                    )
-                finally:
-                    self.log_debug("[emit_output_sync] Finished emitting message event.")
+                self.log_debug("[emit_output_sync] Message event emitted successfully.")
+        except Exception as e:
+            self.log_error(
+                f"[emit_output_sync] Error emitting message event: {e}",
+                exc_info=True,
+            )
+        finally:
+            self.log_debug("[emit_output_sync] Finished emitting message event.")
 
     def pipe(
         self,
         body: dict,
         __user__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Any]] = None,
-        __metadata__: Optional[dict] = None,  # NEW: Added __metadata__ parameter
     ) -> Union[Dict[str, Any], Dict[str, str]]:
         """
         Processes a user request by selecting the appropriate model (chatflow or assistant) or the setup pipe.
@@ -1236,36 +1385,17 @@ class Pipe:
             body (dict): The incoming request payload.
             __user__ (Optional[dict]): The user information.
             __event_emitter__ (Optional[Callable[[dict], Any]]): The event emitter for sending messages.
-            __metadata__ (Optional[dict]): Metadata containing session and chat IDs.
 
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: The Flowise output, setup instructions, or an error message.
         """
-        # Reset state for the new request
-        self.reset_state()
-        self.request_id = str(time.time())
-        self.log_debug(f"[pipe] Starting new request with ID: {self.request_id}")
-
-        output = {}  # Initialize output to ensure it's defined
-
         try:
-            # Extract identifiers from __metadata__
-            chat_id = __metadata__.get('chat_id') if __metadata__ else None  # NEW: Extract chat_id
-            if not chat_id:
-                error_message = "Missing 'chat_id' in metadata."
-                self.log_error(f"[pipe] {error_message}")
-                if __event_emitter__:
-                    self.emit_status_sync(__event_emitter__, error_message, done=True)
-                return {"error": error_message}
+            # Reset state for the new request
+            self.reset_state()
+            self.request_id = str(time.time())
+            self.log_debug(f"[pipe] Starting new request with ID: {self.request_id}")
 
-            # Initialize or retrieve session
-            if chat_id not in self.chat_sessions:
-                self.chat_sessions[chat_id] = {"chat_id": chat_id, "history": [], "system_message": ""}
-                self.log_debug(f"[pipe] Initialized new chat session for chat_id: {chat_id}")
-            else:
-                self.log_debug(f"[pipe] Retrieved existing chat session for chat_id: {chat_id}")
-
-            self.log_debug(f"[pipe] Starting new request with chat_id: {chat_id}")
+            output = {}  # Initialize output to ensure it's defined
 
             # Retrieve and process the model name
             model_full_name = body.get("model", "").strip()
@@ -1352,14 +1482,12 @@ class Pipe:
                 self.log_debug("[pipe] post_entire_chat is False. Using the most recent user message.")
                 last_user_message = self.get_last_user_message(user_messages)
                 if last_user_message:
-                    combined_prompt = last_user_message["content"]
-                    self.log_debug(f"[pipe] Retrieved last user message: {combined_prompt!r}")
+                    combined_prompt = last_user_message
                 else:
                     combined_prompt = self._get_combined_prompt(user_messages)
-                    self.log_debug("[pipe] No user messages available. Using entire chat history.")
 
             self.log_debug(
-                f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt!r}"
+                f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt}"
             )
 
             # Emit initial status: Processing the request
@@ -1389,7 +1517,7 @@ class Pipe:
             if summary:
                 combined_prompt_with_summary = f"{combined_prompt}\n\nSummary:\n{summary}"
                 self.log_debug(
-                    f"[pipe] Combined prompt with summary:\n{combined_prompt_with_summary!r}"
+                    f"[pipe] Combined prompt with summary:\n{combined_prompt_with_summary}"
                 )
             else:
                 combined_prompt_with_summary = combined_prompt
@@ -1398,7 +1526,7 @@ class Pipe:
             if self.valves.include_system_prompt and system_message:
                 combined_prompt_with_summary = f"{system_message}\n\n{combined_prompt_with_summary}"
                 self.log_debug(
-                    f"[pipe] Included system message in prompt:\n{combined_prompt_with_summary!r}"
+                    f"[pipe] Included system message in prompt:\n{combined_prompt_with_summary}"
                 )
 
             # Handle Flowise request
@@ -1407,7 +1535,6 @@ class Pipe:
                 __user__=__user__,
                 __event_emitter__=__event_emitter__,
                 chatflow_name=model_name,
-                chat_id=chat_id,  # NEW: Pass chat_id to associate session
             )
             self.log_debug(f"[pipe] handle_flowise_request output: {output}")
 
@@ -1444,44 +1571,18 @@ class Pipe:
 
             return output
 
-        def clean_response_text(self, text: str) -> str:
-            """
-            Cleans the response text by removing enclosing quotes and trimming whitespace.
+        except Exception as e:
+            # Handle any unexpected exceptions during the pipe processing
+            error_message = f"Unexpected error during pipe processing: {e}"
+            self.log_error(f"[pipe] {error_message}", exc_info=True)
+            if __event_emitter__:
+                self.emit_status_sync(__event_emitter__, error_message, done=True)
+            return {"error": error_message}
 
-            Args:
-                text (str): The text to clean.
-
-            Returns:
-                str: The cleaned text.
-            """
-            self.log_debug(f"[clean_response_text] Entering with: {text!r}")
-            try:
-                pattern = r'^([\'"])(.*)\1$'
-                match = re.match(pattern, text)
-                if match:
-                    text = match.group(2)
-                    self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
-                return text.strip()
-            except Exception as e:
-                self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
-                return text
-            finally:
-                self.log_debug("[clean_response_text] Finished cleaning response text.")
-
-        def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
-            """
-            Combines user and assistant messages into a structured prompt.
-
-            Example:
-                User: Hi!
-                Assistant: Hello! How can I help you today?
-                User: Tell me a joke.
-            """
-            prompt_parts = [
-                f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
-                for message in messages
-            ]
-            combined_prompt = "\n".join(prompt_parts)
-            self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
-            return combined_prompt
-
+        finally:
+            # Ensure the output is returned if it hasn't been already
+            # This prevents 'output' from being undefined
+            if not output:
+                self.log_debug("[pipe] No output generated. Returning empty response.")
+                return {"error": "No output generated."}
+            self.log_debug("[pipe] Pipe processing completed.")
