@@ -373,7 +373,10 @@ class Pipe:
 
             self.log_debug("[emit_citation] Citation event emitted successfully.")
         except Exception as e:
-            self.log_error(f"[emit_citation] Error emitting citation: {e}", exc_info=True)
+            self.log_error(
+                f"[emit_citation] Error emitting citation: {e}",
+                exc_info=True,
+            )
         finally:
             self.log_debug("[emit_citation] Finished emitting citation.")
 
@@ -716,7 +719,11 @@ class Pipe:
                             name = item.get("name", "").strip()
                             model_id = item.get("id", "").strip()
                         elif model_type == "assistant":
-                            details = json.loads(item.get("details", "{}"))
+                            details_str = item.get("details", "{}")
+                            try:
+                                details = json.loads(details_str) if isinstance(details_str, str) else details_str
+                            except json.JSONDecodeError:
+                                details = {}
                             name = details.get("name", "").strip()
                             model_id = item.get("id", "").strip()
                         else:
@@ -1198,18 +1205,6 @@ class Pipe:
             text = self.clean_response_text(raw_text)
             self.log_debug(f"[handle_flowise_request] Cleaned response text: {text!r}")
 
-            # If using 'overrideConfig' with 'sessionId', handle session persistence
-            """
-            new_chat_id = data.get("chatId", chat_id)
-            self.log_debug(f"[handle_flowise_request] New chat ID: {new_chat_id}")
-
-            if new_chat_id and new_chat_id != chat_id:
-                self.session_manager.update_session(user_id, "session_id", new_chat_id)
-                self.log_debug(
-                    f"[handle_flowise_request] Updated session ID for user '{user_id}' to '{new_chat_id}'."
-                )
-            """
-
             if not text:
                 error_message = "Error: Empty response from Flowise."
                 self.log_debug(f"[handle_flowise_request] {error_message}")
@@ -1285,24 +1280,27 @@ class Pipe:
 
     def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
         """
-        Combines user and assistant messages into a structured prompt.
+        Returns the last user message to be used as the combined prompt.
 
-        Example:
-            User: Hi!
-            Assistant: Hello! How can I help you today?
-            User: Tell me a joke.
+        Args:
+            messages (List[Dict[str, str]]): List of message dictionaries.
+
+        Returns:
+            str: The last user message content or an empty string if not found.
         """
+        self.log_debug(f"[get_combined_prompt] Entering with messages: {messages}")
         try:
-            prompt_parts = [
-                f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
-                for message in messages
-            ]
-            combined_prompt = "\n".join(prompt_parts)
-            self.log_debug(f"[get_combined_prompt] Combined prompt:\n{combined_prompt}")
-            return combined_prompt
+            if not messages:
+                self.log_debug("[get_combined_prompt] No messages available.")
+                return ""
+            last_message = messages[-1].get("content", "")
+            self.log_debug(f"[get_combined_prompt] Returning last message: {last_message}")
+            return last_message
         except Exception as e:
-            self.log_error(f"[get_combined_prompt] Error combining prompts: {e}", exc_info=True)
+            self.log_error(f"[get_combined_prompt] Error getting last message: {e}", exc_info=True)
             return ""
+        finally:
+            self.log_debug("[get_combined_prompt] Finished getting combined prompt.")
 
     def reset_state(self):
         """Reset per-request state variables without clearing chat_sessions."""
@@ -1403,6 +1401,7 @@ class Pipe:
         Returns:
             Union[Dict[str, Any], Dict[str, str]]: The Flowise output, setup instructions, or an error message.
         """
+        output = {}  # Initialize output to ensure it's defined
         try:
             # Reset state for the new request
             self.reset_state()
@@ -1492,11 +1491,7 @@ class Pipe:
                 combined_prompt = self._get_combined_prompt(user_messages)
             else:
                 self.log_debug("[pipe] post_entire_chat is False. Using the most recent user message.")
-                last_user_message = self.get_last_user_message(user_messages)
-                if last_user_message:
-                    combined_prompt = last_user_message
-                else:
-                    combined_prompt = self._get_combined_prompt(user_messages)
+                combined_prompt = self._get_combined_prompt(user_messages)
 
             self.log_debug(
                 f"[pipe] Combined prompt for model '{model_name}':\n{combined_prompt}"
@@ -1525,25 +1520,9 @@ class Pipe:
                             include_collapsible=True,
                         )
 
-            # Modify the prompt to include the summary if available
-            if summary:
-                combined_prompt_with_summary = f"{combined_prompt}\n\nSummary:\n{summary}"
-                self.log_debug(
-                    f"[pipe] Combined prompt with summary:\n{combined_prompt_with_summary}"
-                )
-            else:
-                combined_prompt_with_summary = combined_prompt
-
-            # Optionally include system prompt
-            if self.valves.include_system_prompt and system_message:
-                combined_prompt_with_summary = f"{system_message}\n\n{combined_prompt_with_summary}"
-                self.log_debug(
-                    f"[pipe] Included system message in prompt:\n{combined_prompt_with_summary}"
-                )
-
             # Handle Flowise request
             output = self.handle_flowise_request(
-                question=combined_prompt_with_summary,  # Updated to include summary and system prompt if enabled
+                question=combined_prompt,  # Pass the latest user message as 'question'
                 __user__=__user__,
                 __event_emitter__=__event_emitter__,
                 chatflow_name=model_name,
@@ -1592,9 +1571,57 @@ class Pipe:
             return {"error": error_message}
 
         finally:
-            # Ensure the output is returned if it hasn't been already
-            # This prevents 'output' from being undefined
-            if not output:
-                self.log_debug("[pipe] No output generated. Returning empty response.")
-                return {"error": "No output generated."}
-            self.log_debug("[pipe] Pipe processing completed.")
+            # Final logging actions
+            if output:
+                self.log_debug("[pipe] Pipe processing completed successfully.")
+            else:
+                self.log_debug("[pipe] Pipe processing completed with errors.")
+
+    def clean_response_text(self, text: str) -> str:
+        """
+        Cleans the response text by removing enclosing quotes and trimming whitespace.
+
+        Args:
+            text (str): The text to clean.
+
+        Returns:
+            str: The cleaned text.
+        """
+        self.log_debug(f"[clean_response_text] Entering with: {text!r}")
+        try:
+            pattern = r'^([\'"])(.*)\1$'
+            match = re.match(pattern, text)
+            if match:
+                text = match.group(2)
+                self.log_debug(f"[clean_response_text] Stripped quotes: {text!r}")
+            return text.strip()
+        except Exception as e:
+            self.log_error(f"[clean_response_text] Error: {e}", exc_info=True)
+            return text
+        finally:
+            self.log_debug("[clean_response_text] Finished cleaning response text.")
+
+    def _get_combined_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Returns the last user message to be used as the combined prompt.
+
+        Args:
+            messages (List[Dict[str, str]]): List of message dictionaries.
+
+        Returns:
+            str: The last user message content or an empty string if not found.
+        """
+        self.log_debug(f"[get_combined_prompt] Entering with messages: {messages}")
+        try:
+            if not messages:
+                self.log_debug("[get_combined_prompt] No messages available.")
+                return ""
+            last_message = messages[-1].get("content", "")
+            self.log_debug(f"[get_combined_prompt] Returning last message: {last_message}")
+            return last_message
+        except Exception as e:
+            self.log_error(f"[get_combined_prompt] Error getting last message: {e}", exc_info=True)
+            return ""
+        finally:
+            self.log_debug("[get_combined_prompt] Finished getting combined prompt.")
+
