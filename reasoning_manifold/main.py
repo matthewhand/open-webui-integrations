@@ -1,47 +1,136 @@
 """
 title: Open-WebUI Reasoning Manifold
-version: 0.4.8c
+version: 0.5.0
 
 - [x] Updated to work on OWUI 0.4.x
+- [ ] Updated to work on OWUI 0.5.x
+ - [x] Wrapper functions to support new signatures
+ - [ ] Fix ERROR [asyncio] Unclosed client session (OWUI bug?)
+ - [ ] Fix collapsible in follow up queries.
 - [x] OpenAI streaming
 - [x] Ollama streaming
 - [x] Thought expansion
 - [x] LLM summary generation
 - [x] Advanced parsing logic
 - [x] Optimised emission timing
-- [x] Valve to append system prompt to ever request
-
+- [x] Valve to append system prompt to every request
+- [ ] Support summary models that have connection prefix eg 'ollama.' (OWUI bug?)
 """
 
 import os
 import json
 import time
 import asyncio
-from typing import List, Union, Optional, Callable, Awaitable, Dict, Any
+import importlib
+import re
+from datetime import datetime
+from typing import List, Union, Optional, Callable, Awaitable, Dict, Any, Tuple
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import pop_system_message, add_or_update_system_message
+from starlette.requests import Request
 from starlette.responses import StreamingResponse
-from open_webui.main import (
-    generate_chat_completions,
-    get_task_model_id,
-)
-from open_webui.utils.misc import get_last_assistant_message, get_content_from_message
+
 from open_webui.config import TASK_MODEL, TASK_MODEL_EXTERNAL
 
 import logging
-import inspect  # For inspecting function signatures
-import re  # For regex operations
-
-
-# Mock the user object as expected by the function (OWUI 0.4.x constraint)
-mock_user = {
-    "id": "reasoning_manifold",
-    "username": "reasoning_manifold",
-    "role": "admin",
-}
 
 THOUGHT_SUMMARY_PLACEHOLDER = "your-task-model-id-goes-here"
 SYSTEM_MESSAGE_DEFAULT = "Respond using <Thought> and <Output> tags."
+
+# Initialize logging
+logger = logging.getLogger("PipeWrapper")
+handler = logging.StreamHandler()
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+handler.setFormatter(formatter)
+if not logger.handlers:
+    logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all debug messages
+
+
+async def _get_version_info() -> Dict[str, str]:
+    """
+    Fetch the OWUI version information.
+    """
+    try:
+        module = importlib.import_module("open_webui.main")
+        get_app_version = getattr(module, "get_app_version", None)
+        if not get_app_version:
+            logger.debug("get_app_version not found in open_webui.main")
+            return {"version": "0.0.0"}
+        version_info = await get_app_version()  # e.g., {"version": "0.4.8c"}
+        logger.debug(f"Fetched OWUI version: {version_info.get('version', '0.0.0')}")
+        return version_info
+    except Exception as e:
+        logger.error(f"Error fetching version info: {e}")
+        return {"version": "0.0.0"}
+
+
+def is_version_0_5_or_greater(version_info: Dict[str, str]) -> bool:
+    """
+    Determine if the OWUI version is 0.5 or greater.
+
+    Args:
+        version_info (Dict[str, str]): The version information dictionary.
+
+    Returns:
+        bool: True if version is 0.5 or greater, False otherwise.
+    """
+    version_str = version_info.get("version", "0.0.0")
+    match = re.match(r"(\d+)\.(\d+)", version_str)
+    if not match:
+        logger.debug(
+            f"Version parsing failed for version string: '{version_str}'. Assuming version is below 0.5."
+        )
+        return False
+    major, minor = map(int, match.groups())
+    logger.debug(f"Parsed OWUI version: major={major}, minor={minor}")
+    return (major, minor) >= (0, 5)
+
+async def _pop_system_message(
+    body_messages: List[dict],
+) -> Tuple[Optional[dict], List[dict]]:
+    """
+    Wrapper that calls the correct pop_system_message function based on OWUI version.
+    """
+    version_info = await _get_version_info()
+    # Assuming 'pop_system_message' hasn't moved, but if it has, handle accordingly
+    try:
+        module = importlib.import_module("open_webui.utils.misc")
+        pop_system_message = getattr(module, "pop_system_message", None)
+        if pop_system_message:
+            logger.debug("Using 'pop_system_message' from 'open_webui.utils.misc'.")
+            return pop_system_message(body_messages)
+        else:
+            raise ImportError(
+                "Unable to import 'pop_system_message' from 'open_webui.utils.misc'"
+            )
+    except ImportError as e:
+        logger.error(e)
+        raise
+
+
+async def _add_or_update_system_message(message: str, messages: List[dict]) -> None:
+    """
+    Wrapper that calls the correct add_or_update_system_message function based on OWUI version.
+    """
+    version_info = await _get_version_info()
+    # Assuming 'add_or_update_system_message' hasn't moved, but if it has, handle accordingly
+    try:
+        module = importlib.import_module("open_webui.utils.misc")
+        add_or_update_system_message = getattr(
+            module, "add_or_update_system_message", None
+        )
+        if add_or_update_system_message:
+            logger.debug(
+                "Using 'add_or_update_system_message' from 'open_webui.utils.misc'."
+            )
+            add_or_update_system_message(message, messages)
+        else:
+            raise ImportError(
+                "Unable to import 'add_or_update_system_message' from 'open_webui.utils.misc'"
+            )
+    except ImportError as e:
+        logger.error(e)
+        raise
 
 
 class Pipe:
@@ -50,6 +139,98 @@ class Pipe:
     processes internal thought tags, manages output parsing, generates summaries,
     and ensures clean and user-friendly message emission without exposing internal tags.
     """
+
+    def _get_complete_user(self) -> dict:
+        """
+        Add default values for missing user fields and return a complete dictionary.
+        Ensures datetime fields are Unix timestamps (int).
+        """
+        now = int(datetime.now().timestamp())  # Current Unix timestamp
+        return {
+            **self.user,
+            "profile_image_url": self.user.get("profile_image_url", ""),
+            "last_active_at": self._convert_to_timestamp(self.user.get("last_active_at", now)),
+            "updated_at": self._convert_to_timestamp(self.user.get("updated_at", now)),
+            "created_at": self._convert_to_timestamp(self.user.get("created_at", now)),
+        }
+
+    @staticmethod
+    def _convert_to_timestamp(value):
+        """
+        Convert a value to Unix timestamp (int).
+        If the value is already an int, return as-is.
+        If it's a string (ISO format), parse and convert.
+        """
+        if isinstance(value, int):
+            return value
+        elif isinstance(value, str):
+            try:
+                # Parse ISO 8601 string and convert to timestamp
+                dt = datetime.fromisoformat(value)
+                return int(dt.timestamp())
+            except ValueError:
+                raise ValueError(f"Invalid timestamp format: {value}")
+        else:
+            raise TypeError(f"Unsupported type for timestamp conversion: {type(value)}")
+
+    async def _chat_completion(self, form_data: dict) -> dict:
+        version_info = await _get_version_info()
+        if is_version_0_5_or_greater(version_info):
+            try:
+                from open_webui.models.users import UserModel
+                module = importlib.import_module("open_webui.main")
+                chat_completion = getattr(module, "chat_completion", None)
+                if chat_completion:
+                    logger.debug("Using 'chat_completion' for OWUI 0.5.x.")
+                    user_model = UserModel(**self._get_complete_user())
+                    return await chat_completion(request=self.request, form_data=form_data, user=user_model)
+                else:
+                    raise ImportError("Function 'chat_completion' not found in Open-WebUI main module")
+            except ImportError as e:
+                logger.error(f"ImportError: {e}")
+                raise
+        else:
+            # OWUI 0.4.x fallback
+            try:
+                module = importlib.import_module("open_webui.main")
+                generate_chat_completions = getattr(module, "generate_chat_completions", None)
+                if generate_chat_completions:
+                    logger.debug("Using 'generate_chat_completions' for OWUI 0.4.x.")
+                    return await generate_chat_completions(form_data=form_data, user=self.user, bypass_filter=True)
+                else:
+                    raise ImportError("Unable to import 'generate_chat_completions' from 'open_webui.main'")
+            except ImportError as e:
+                logger.error(f"ImportError: {e}")
+                raise
+
+    async def _non_stream_completion(self, form_data: dict) -> Optional[str]:
+        version_info = await _get_version_info()
+        try:
+            module = importlib.import_module("open_webui.main")
+            if is_version_0_5_or_greater(version_info):
+                from open_webui.models.users import UserModel
+                chat_completion = getattr(module, "chat_completion", None)
+                if chat_completion:
+                    logger.debug("Using 'chat_completion' for OWUI 0.5.x (non-streaming).")
+                    user_model = UserModel(**self._get_complete_user())
+                    response = await chat_completion(request=self.request, form_data=form_data, user=user_model)
+            else:
+                generate_chat_completions = getattr(module, "generate_chat_completions", None)
+                if generate_chat_completions:
+                    logger.debug("Using 'generate_chat_completions' for OWUI 0.4.x (non-streaming).")
+                    response = await generate_chat_completions(form_data=form_data, user=self.user, bypass_filter=True)
+
+            # Extract summary
+            if response and "choices" in response:
+                content = response["choices"][0].get("message", {}).get("content", "").strip()
+                if content:
+                    logger.debug(f"Generated summary: {content}")
+                    return content
+            logger.debug("Response structure invalid or no summary generated.")
+            return None
+        except Exception as e:
+            logger.error(f"Error in _non_stream_completion: {e}")
+            return None
 
     class Valves(BaseModel):
         """
@@ -145,7 +326,7 @@ class Pipe:
         self.output_buffer = ""  # Accumulate emitted output tokens
         self.word_count_since_last_summary = 0  # Word count tracker for summaries
         self.start_time = time.time()  # Reset start time for duration tracking
-        self.tracked_tokens = []  # Tracked tokens for dynamic summaries
+        self.tracked_tokens = []  # Track tokens for dynamic summaries
         self.stop_emitter.clear()  # Ensure emitter can be stopped cleanly
         self.final_status_emitted = False  # Reset final status emission flag
         self.summary_in_progress = False  # Summary generation flag
@@ -179,7 +360,6 @@ class Pipe:
         self.buffer = ""  # Initialize the buffer
         self.tracked_tokens = []  # Track tokens for dynamic summaries
         self.last_summary_time = time.time()  # Last time a summary was emitted
-        self.task_model_id = None  # Will be set in pipe method
         self.determined = False
         self.inside_thought = False
         self.inside_output = False
@@ -201,15 +381,8 @@ class Pipe:
         )  # Default to valve's output_tag
 
         # Setup Logging
-        self.log = logging.getLogger(self.__class__.__name__)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-        handler.setFormatter(formatter)
-        if not self.log.handlers:
-            self.log.addHandler(handler)
-        self.log.setLevel(logging.DEBUG if self.valves.debug_valve else logging.INFO)
+        self.log = logger  # Use the initialized logger
+        # The logger is already set up with handlers and level in the wrapper functions
 
         # Parse tags based on reasoning_model_ids
         self.parse_tags()
@@ -290,12 +463,12 @@ class Pipe:
     def get_summary_model_id(self) -> str:
         """
         Determine the model ID to use for generating summaries.
-        Returns the `thought_summary_model_id` if specified and not default; otherwise, falls back to `task_model_id`.
+        Returns the `thought_summary_model_id` if specified and not default; otherwise, returns an empty string.
         """
         if (
             self.valves.thought_summary_model_id
             and self.valves.thought_summary_model_id.lower()
-            != THOUGHT_SUMMARY_PLACEHOLDER
+            != THOUGHT_SUMMARY_PLACEHOLDER.lower()
         ):
             self.log_debug(
                 f"[SUMMARY_CHECK] Using model ID for summary: {self.valves.thought_summary_model_id}"
@@ -318,6 +491,7 @@ class Pipe:
         body: dict,
         __user__: Optional[dict] = None,
         __event_emitter__: Callable[[dict], Awaitable[None]] = None,
+        __request__: Optional[Request] = None,
     ) -> Union[str, StreamingResponse]:
         """
         Main handler for processing requests.
@@ -333,12 +507,18 @@ class Pipe:
             body (dict): The incoming request payload.
             __user__ (Optional[dict]): The user information.
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+            __request__ (Optional[Request]): The request object.
 
         Returns:
             Union[str, StreamingResponse]: The response to be sent back.
         """
         # Reset state variables for each new request
         self.reset_state()
+
+        self.user = __user__
+        self.request = __request__
+
+        self.client_session = aiohttp.ClientSession() # Workaround for OWUI 0.5.x session management
 
         try:
             # Extract model ID and clean prefix by stripping up to the first dot
@@ -353,26 +533,20 @@ class Pipe:
                     f"model_id does not contain a dot and remains unchanged: {model_id}"
                 )
 
-            # Determine the task model ID dynamically, considering valve overrides
-            try:
-                self.task_model_id = self.get_summary_model_id()
-                self.log_debug(f"Resolved task_model_id: {self.task_model_id}")
-            except RuntimeError as e:
-                self.log_debug(f"Failed to resolve task model ID: {e}")
-                self.task_model_id = model_id  # Fallback to original model_id
-
-            self.log_debug(f"Selected task_model_id: {self.task_model_id}")
+            # Determine the summary model ID dynamically, considering valve overrides
+            summary_model_id = self.get_summary_model_id()
+            self.log_debug(f"Resolved summary_model_id: {summary_model_id}")
 
             # Handle system messages if present (assumes system messages are separated)
             body_messages = body.get("messages", [])
-            system_message, messages = pop_system_message(body_messages)
+            system_message, messages = await _pop_system_message(body_messages)
 
             # Append system prompt to user messages if the valve is enabled
             if self.valves.append_system_prompt:
                 system_prompt = (
                     self.valves.system_message_override
                     if self.valves.system_message_override_enabled
-                    else get_content_from_message(system_message)
+                    else (system_message.get("content") if system_message else "")
                 )
                 for message in messages:
                     if message["role"] == "user":
@@ -385,7 +559,7 @@ class Pipe:
             # Handle system message override or pass-through
             if self.valves.system_message_override_enabled:
                 # Append the overridden system message to the beginning of the list
-                add_or_update_system_message(
+                await _add_or_update_system_message(
                     self.valves.system_message_override, messages
                 )
                 self.log_debug(
@@ -393,8 +567,8 @@ class Pipe:
                 )
             elif system_message:
                 # Append the provided system message to the beginning of the list
-                system_message_content = get_content_from_message(system_message)
-                add_or_update_system_message(system_message_content, messages)
+                system_message_content = system_message.get("content", "")
+                await _add_or_update_system_message(system_message_content, messages)
                 self.log_debug(
                     f"Using provided system message: {system_message_content}"
                 )
@@ -419,19 +593,28 @@ class Pipe:
                 for message in messages
             ]
 
+            # Prepare payload using 'messages' everywhere
             payload = {
                 "model": model_id,
                 "messages": processed_messages,
+                "max_tokens": 500,  # Adjust as needed
+                "temperature": 0.7,  # Adjust as needed
+                "stream": self.valves.streaming_enabled,  # Ensure streaming is enabled based on configuration
             }
 
             self.log_debug(f"Payload prepared for model '{model_id}': {payload}")
 
             if self.valves.streaming_enabled:
                 self.log_debug("Streaming is enabled. Handling stream response.")
-                response = await self.stream_response(payload, __event_emitter__)
+                response = await self.stream_response(
+                    payload, __event_emitter__
+                )
             else:
                 self.log_debug("Streaming is disabled. Handling non-stream response.")
-                response = await self.non_stream_response(payload, __event_emitter__)
+                summary = await self.non_stream_response(
+                    payload, __event_emitter__
+                )
+                response = summary  # Since non_stream_response now returns the summary directly
 
             self.log_debug("Response handling completed.")
             return response
@@ -450,17 +633,14 @@ class Pipe:
                 )
             self.log_debug(f"Error in pipe method: {e}")
             return f"Error: {e}"
+        finally:
+            await self.client_session.close() # Workaround for OWUI 0.5.x session management
 
-    async def stream_response(self, payload, __event_emitter__) -> StreamingResponse:
+    async def stream_response(
+        self, payload: dict, __event_emitter__
+    ) -> StreamingResponse:
         """
-        Handle streaming responses from generate_chat_completions.
-
-        Steps:
-        1. Call the generate_chat_completions function with streaming enabled.
-        2. Iterate over each chunk in the streaming response.
-        3. Process each chunk based on its content and type.
-        4. Manage operational modes and emit messages accordingly.
-        5. Handle the finalization of the stream upon receiving [DONE].
+        Handle streaming responses using the appropriate chat completion wrapper.
 
         Args:
             payload (dict): The payload to send to the model.
@@ -482,18 +662,19 @@ class Pipe:
                     f"[STREAM_RESPONSE] Payload for generate_chat_completions: {payload}"
                 )
 
-                # Call the generate_chat_completions function
-                stream_response = await generate_chat_completions(
-                    form_data=payload, user=mock_user, bypass_filter=True
+                # Call the appropriate chat completion wrapper
+                stream_response = await self._chat_completion(
+                    form_data=payload
                 )
                 self.log_debug(
-                    "[STREAM_RESPONSE] generate_chat_completions called successfully."
+                    "[STREAM_RESPONSE] _chat_completion called successfully."
                 )
 
-                # Ensure the response is a StreamingResponse
+                # Handle the streaming response
+                # Assuming _chat_completion returns a StreamingResponse
                 if isinstance(stream_response, StreamingResponse):
                     self.log_debug(
-                        "[STREAM_RESPONSE] Received StreamingResponse from generate_chat_completions."
+                        "[STREAM_RESPONSE] Received StreamingResponse from _chat_completion."
                     )
 
                     # Iterate over the body_iterator of the StreamingResponse
@@ -555,7 +736,7 @@ class Pipe:
                                                 f"[STREAM_FINALIZE] Tags detected. Finalizing remaining buffer: {self.buffer}"
                                             )
                                             await self.process_streaming_data(
-                                                "",
+                                                "",  # No new data
                                                 __event_emitter__,
                                                 is_final_chunk=True,
                                             )
@@ -639,8 +820,10 @@ class Pipe:
                                             self.llm_tasks.append(summary_task)
                                         else:
                                             self.log_debug(
-                                                "[TOKEN_SUMMARY] Summary already in progress. Skipping additional summary trigger."
+                                                "[TOKEN_SUMMARY] Summary already in progress. Resetting word count."
                                             )
+                                            # Reset the counter if a summary is already being generated
+                                            self.word_count_since_last_summary = 0
 
                             else:
                                 # Handle unexpected data format
@@ -650,7 +833,7 @@ class Pipe:
 
                         except Exception as e:
                             # Handle errors in processing chunks
-                            self.log_debug(
+                            self.log.debug(
                                 f"[STREAM_RESPONSE] Error processing chunk: {chunk_str}. Error: {e}"
                             )
                             continue
@@ -665,7 +848,7 @@ class Pipe:
 
             except Exception as e:
                 # Handle errors in the response generator
-                self.log_debug(f"[STREAM_RESPONSE] Error in response_generator: {e}")
+                self.log.debug(f"[STREAM_RESPONSE] Error in response_generator: {e}")
                 yield f'data: {{"error": "{str(e)}"}}\n\n'
 
             self.log_debug("[STREAM_RESPONSE] Exiting response_generator.")
@@ -696,11 +879,11 @@ class Pipe:
             )
             return
 
-        if not (self.valves.enable_llm_summaries):
+        if not self.valves.enable_llm_summaries:
             self.log_debug("[TRIGGER_SUMMARY] LLM summaries are disabled.")
             return
 
-        if not (self.tags_detected):
+        if not self.tags_detected:
             self.log_debug("[TRIGGER_SUMMARY] No tags detected.")
             return
 
@@ -760,39 +943,44 @@ class Pipe:
             return None
 
         summary_model_id = self.get_summary_model_id()
-        if summary_model_id != "":
-            payload = {
-                "model": self.get_summary_model_id(),
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": self.valves.dynamic_status_system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": f"{self.valves.dynamic_status_prompt} {' '.join(self.tracked_tokens)}",
-                    },
-                ],
-                "max_tokens": 20,
-                "temperature": 0.5,
-            }
+        if not summary_model_id:
+            self.log_debug("[GENERATE_SUMMARY] Summary model ID not configured.")
+            return None
 
-            try:
-                self.log_debug(
-                    f"[GENERATE_SUMMARY] Generating summary with payload: {payload}"
-                )
-                response = await generate_chat_completions(
-                    form_data=payload, user=mock_user, bypass_filter=True
-                )
-                # Ensure that the summary does not contain trailing newlines
-                summary = (
-                    response["choices"][0]["message"]["content"].rstrip("\n").strip()
-                )
-                self.log_debug(f"[SUMMARY_GENERATED] Generated summary: {summary}")
-                return summary
-            except Exception as e:
-                self.log_debug(f"[GENERATE_SUMMARY] Error generating summary: {e}")
+        # Prepare payload using 'messages' everywhere
+        payload = {
+            "model": summary_model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": self.valves.dynamic_status_system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": f"{self.valves.dynamic_status_prompt} {' '.join(self.tracked_tokens)}",
+                },
+            ],
+            "max_tokens": 20,
+            "temperature": 0.5,
+        }
+
+        self.log_debug(f"[GENERATE_SUMMARY] Generating summary with payload: {payload}")
+        
+        try:
+            # Using the non-streaming chat completion wrapper which returns the summary directly
+            result = await self._non_stream_completion(
+                form_data=payload
+            )
+            if result:
+                self.log_debug(f"[SUMMARY_GENERATED] Generated summary: {result}")
+                return result
+            else:
+                self.log_debug("[GENERATE_SUMMARY] _non_stream_completion returned None.")
                 return None
+        except Exception as e:
+            self.log_debug(f"[GENERATE_SUMMARY] Error generating summary: {e}")
+            return None
+
 
     async def emit_status(
         self,
@@ -895,7 +1083,15 @@ class Pipe:
             "type": "message",
             "data": {"content": enclosure},
         }
-        await __event_emitter__(message_event)
+        try:
+            await __event_emitter__(message_event)
+            self.log_debug(
+                "[UPDATE_MESSAGES] Collapsible thought message emitted successfully."
+            )
+        except Exception as e:
+            self.log_debug(
+                f"[UPDATE_MESSAGES] Error emitting collapsible thought message: {e}"
+            )
 
     async def emit_output(self, __event_emitter__, content: str) -> None:
         """
@@ -1019,60 +1215,64 @@ class Pipe:
             "[FINALIZE_OUTPUT] Switching back to standard_streaming mode after finalizing output."
         )
 
-    async def non_stream_response(self, payload, __event_emitter__):
+    async def non_stream_response(
+        self, payload: dict, __event_emitter__
+    ) -> Optional[str]:
         """
-        Handle non-streaming responses from generate_chat_completions.
-
-        Steps:
-        1. Call the generate_chat_completions function without streaming.
-        2. Emit the assistant's message to the user.
-        3. Emit the final status message indicating the duration of the 'Thinking' phase.
+        Handle non-streaming responses using the appropriate chat completion wrapper and return the summary directly.
 
         Args:
             payload (dict): The payload to send to the model.
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+            __request__ (Optional[Request]): The request object.
 
         Returns:
-            Union[str, Dict[str, Any]]: The response content or error message.
+            Optional[str]: The summary generated by the model.
         """
         self.log_debug("[NON_STREAM_RESPONSE] Entered non_stream_response function.")
         try:
             if self.valves.debug_valve:
                 self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Calling generate_chat_completions for non-streaming with payload: {payload}"
+                    f"[NON_STREAM_RESPONSE] Calling _non_stream_completion for non-streaming with payload: {payload}"
                 )
-            response_content = await generate_chat_completions(form_data=payload)
+            summary = await self._non_stream_completion(
+                form_data=payload
+            )
             self.log_debug(
-                f"[NON_STREAM_RESPONSE] generate_chat_completions response: {response_content}"
+                f"[NON_STREAM_RESPONSE] _non_stream_completion returned summary: {summary}"
             )
 
-            assistant_message = response_content["choices"][0]["message"][
-                "content"
-            ].rstrip("\n")
-            response_event = {
-                "type": "message",
-                "data": {"content": assistant_message},
-            }
+            if summary:
+                # Emit the summary as a message
+                response_event = {
+                    "type": "message",
+                    "data": {"content": summary},
+                }
 
-            if __event_emitter__:
-                if self.tags_detected:
-                    await self.emit_status(
-                        __event_emitter__, "Info", "Thinking", initial=True
+                if __event_emitter__:
+                    if self.tags_detected:
+                        await self.emit_status(
+                            __event_emitter__, "Info", "Thinking", initial=True
+                        )
+                    await __event_emitter__(response_event)
+                    self.log_debug(
+                        "[NON_STREAM_RESPONSE] Non-streaming summary message emitted successfully."
                     )
-                await __event_emitter__(response_event)
+
+                # Emit the final status or modify message content based on valve
+                await self.emit_final_status(__event_emitter__)
+
+                if self.valves.debug_valve:
+                    self.log_debug(
+                        f"[NON_STREAM_RESPONSE] Emitted summary event: {response_event}"
+                    )
+
+                return summary
+            else:
                 self.log_debug(
-                    "[NON_STREAM_RESPONSE] Non-streaming message event emitted successfully."
+                    "[NON_STREAM_RESPONSE] No summary returned from _non_stream_completion."
                 )
-
-            # Emit the final status or modify message content based on valve
-            await self.emit_final_status(__event_emitter__)
-
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Emitted response event: {response_event}"
-                )
-
-            return response_content
+                return None
         except Exception as e:
             if __event_emitter__:
                 await self.emit_status(
@@ -1082,7 +1282,7 @@ class Pipe:
                 self.log_debug(
                     f"[NON_STREAM_RESPONSE] Error in non-stream response handling: {e}"
                 )
-            return f"Error: {e}"
+            return None
 
     async def process_streaming_data(
         self, data: str, __event_emitter__, is_final_chunk: bool = False
@@ -1100,6 +1300,7 @@ class Pipe:
         Args:
             data (str): The incoming data chunk to process.
             __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
+            is_final_chunk (bool): Indicates if this is the final chunk in the stream.
         """
         self.log_debug(
             f"[PROCESS_DATA] Processing streaming data: {data}, Final Chunk: {is_final_chunk}"
@@ -1179,7 +1380,7 @@ class Pipe:
 
                     await self.emit_final_status(__event_emitter__)
 
-                    # Switch to standard streaming after thought parsing
+                    # Switch to buffer_parsing after thought parsing
                     self.mode = "buffer_parsing"
                     self.log_debug(
                         "[THOUGHT_PARSING] Switching to buffer_parsing mode after emitting collapsible thoughts."
@@ -1279,68 +1480,3 @@ class Pipe:
             )
             await self.emit_output(__event_emitter__, self.buffer)
             self.buffer = ""
-
-    async def non_stream_response(self, payload, __event_emitter__):
-        """
-        Handle non-streaming responses from generate_chat_completions.
-
-        Steps:
-        1. Call the generate_chat_completions function without streaming.
-        2. Emit the assistant's message to the user.
-        3. Emit the final status message indicating the duration of the 'Thinking' phase.
-
-        Args:
-            payload (dict): The payload to send to the model.
-            __event_emitter__ (Callable[[dict], Awaitable[None]]): The event emitter for sending messages.
-
-        Returns:
-            Union[str, Dict[str, Any]]: The response content or error message.
-        """
-        self.log_debug("[NON_STREAM_RESPONSE] Entered non_stream_response function.")
-        try:
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Calling generate_chat_completions for non-streaming with payload: {payload}"
-                )
-            response_content = await generate_chat_completions(form_data=payload)
-            self.log_debug(
-                f"[NON_STREAM_RESPONSE] generate_chat_completions response: {response_content}"
-            )
-
-            assistant_message = response_content["choices"][0]["message"][
-                "content"
-            ].rstrip("\n")
-            response_event = {
-                "type": "message",
-                "data": {"content": assistant_message},
-            }
-
-            if __event_emitter__:
-                if self.tags_detected:
-                    await self.emit_status(
-                        __event_emitter__, "Info", "Thinking", initial=True
-                    )
-                await __event_emitter__(response_event)
-                self.log_debug(
-                    "[NON_STREAM_RESPONSE] Non-streaming message event emitted successfully."
-                )
-
-            # Emit the final status or modify message content based on valve
-            await self.emit_final_status(__event_emitter__)
-
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Emitted response event: {response_event}"
-                )
-
-            return response_content
-        except Exception as e:
-            if __event_emitter__:
-                await self.emit_status(
-                    __event_emitter__, "Error", f"Error: {str(e)}", True
-                )
-            if self.valves.debug_valve:
-                self.log_debug(
-                    f"[NON_STREAM_RESPONSE] Error in non-stream response handling: {e}"
-                )
-            return f"Error: {e}"
